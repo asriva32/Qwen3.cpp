@@ -67,3 +67,9 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+.vscode
+.codex
+.agents
+__pycache__
+Qwen3.bin
