@@ -1,6 +1,5 @@
 #include "inference.h"
 
-#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
@@ -27,7 +26,7 @@ int main(int argc, char** argv) {
     const std::string prompt = argc > 2 ? argv[2] : "Hello";
     const int context_length = argc > 3 ? std::stoi(argv[3]) : 512;
     const bool apply_chat_template = argc <= 4 || std::string(argv[4]) != "--raw";
-
+    
     try {
         Qwen3 model;
         model.Load(model_path);

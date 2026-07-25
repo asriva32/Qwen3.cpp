@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
         Check(static_cast<std::int64_t>(qnorm_tensor.data.size() * sizeof(float)) == qnorm.byte_size,
               "q_norm payload size mismatch");
         Check(qnorm_tensor.ptr() != nullptr, "q_norm fp32 view should not be null");
-        Check(qnorm_tensor.count() == config.head_dim, "q_norm fp32 count mismatch");
+        Check(qnorm_tensor.data.size() == config.head_dim, "q_norm fp32 count mismatch");
 
         std::cout << "loader tests passed\n";
     } catch (const std::exception& error) {

@@ -15,7 +15,7 @@
 #include <span>
 
 namespace tokenizers {
-class Tokenizer;
+    class Tokenizer;
 }
 
 enum class TensorDType : std::uint32_t {
@@ -27,9 +27,9 @@ enum class TensorDType : std::uint32_t {
 struct TensorInfo {
     std::string name;
     TensorDType dtype;
-    std::vector<std::int64_t> shape;
-    std::int64_t data_offset = 0;
-    std::int64_t byte_size = 0;
+    std::vector<std::size_t> shape;
+    std::size_t data_offset = 0;
+    std::size_t byte_size = 0;
 };
 
 template <typename T>
@@ -49,10 +49,6 @@ struct Tensor {
 
     T* ptr() {
         return data.data();
-    }
-
-    std::int64_t count() const {
-        return static_cast<std::int64_t>(data.size());
     }
 };
 
@@ -80,6 +76,22 @@ public:
     bool tie_word_embeddings = false;
     bool attention_bias = false;
     bool qk_norm = false;
+};
+
+// Avoid as many allocations as possible
+struct State {
+    // From RMSNorm
+    std::vector<float> lin1;
+    std::vector<float> lin2;
+    // From Block
+    std::vector<float> norm_buffer;
+    std::vector<float> q;
+    std::vector<float> k;
+    std::vector<float> v;
+    std::vector<float> attn_output;
+    std::vector<float> projected;
+    std::vector<float> attn_scores;
+    State(const std::shared_ptr<Config>& c);
 };
 
 class Tokenizer {
@@ -153,12 +165,11 @@ struct BlockWeights {
 
 class Block {
 public:
-    void forward(float* x, int pos, int num_sink, int kv_pos, int kv_len);
+    void forward(float* x, int pos, int num_sink, int kv_pos, int kv_len, State &state);
 
     explicit Block(const std::shared_ptr<Config>& config);
     Block(const std::shared_ptr<Config>& config, BlockWeights weights);
 
-    void SetWeights(BlockWeights weights);
     void ResetCache();
 
     Config* GetConfig() {
@@ -174,13 +185,6 @@ private:
     std::shared_ptr<Config> config;
     BlockWeights weights;
     KVCache cache;
-    std::vector<float> norm_buffer;
-    std::vector<float> q;
-    std::vector<float> k;
-    std::vector<float> v;
-    std::vector<float> attn_output;
-    std::vector<float> projected;
-    std::vector<float> attn_scores;
 };
 
 class Transformer {
@@ -218,7 +222,7 @@ public:
     void InitializeInference(int context_length = 512);
     void ResetInference();
 
-    const std::vector<float>& ForwardToken(std::int32_t token, int pos);
+    const std::vector<float>& ForwardToken(std::int32_t token, int pos, State &state);
     GenerationResult Generate(
         std::string_view prompt,
         bool apply_chat_template = true
@@ -249,7 +253,7 @@ private:
 
 
 template <SupportedTensorElement T>
-TensorDType ExpectedDType() {
+constexpr TensorDType ExpectedDType() {
     if constexpr (std::same_as<T, float>) {
         return TensorDType::Float32;
     } else if constexpr (std::same_as<T, std::int32_t>) {
@@ -263,7 +267,7 @@ std::vector<std::uint8_t> LoadTensorBytes(
     const std::string& path,
     const TensorInfo& info,
     TensorDType expected_dtype,
-    std::int64_t element_size
+    std::size_t element_size
 );
 
 
@@ -279,12 +283,12 @@ Tensor<T> Qwen3::LoadTensor(const std::string& name) const {
         model_path_,
         info,
         ExpectedDType<T>(),
-        static_cast<std::int64_t>(sizeof(T))
+        sizeof(T)
     );
 
     std::vector<T> data(bytes.size() / sizeof(T));
     std::memcpy(data.data(), bytes.data(), bytes.size());
-    return Tensor<T>{info, std::move(data)}; // wouldn't compiler do a move for us
+    return Tensor<T>{info, std::move(data)};
 }
 
 void RmsNorm(const float *x, const float *weights, float *out, float eps, int n);
@@ -293,6 +297,6 @@ float Gelu(float x);
 float Silu(float x);
 void MatMul(float *out, const float *x, const float *y, int n, int m);
 void ApplyRotaryEmb(float *out, int d, int head_dim, int pos, float theta, int rotary_dim);
-void FeedForwardNetwork(float *out, const float *x, const float *w1, const float *w2, const float *w3, int hidden_dim, int dim);
+void FeedForwardNetwork(float *out, float *lin1, float *lin2, const float *x, const float *w1, const float *w2, const float *w3, int hidden_dim, int dim);
 void Attn(float *out, float *atth, const float *q, const float *k, const float *v, int head_dim, int n_kv_heads, int kv_len);
 #endif

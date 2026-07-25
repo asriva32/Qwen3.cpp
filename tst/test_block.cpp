@@ -85,7 +85,6 @@ int main() {
 
         const std::vector<float> sample_logits = {-2.0f, 0.5f, 0.25f};
         Check(Sampler::Greedy(sample_logits) == 1, "Greedy sampler chose the wrong token");
-
         auto expanded_config = std::make_shared<Config>();
         expanded_config->dim = 2;
         expanded_config->hidden_dim = 2;
@@ -98,7 +97,8 @@ int main() {
         expanded_config->norm_eps = 1e-5f;
         Block expanded_query_block(expanded_config, MakeExpandedQueryWeights());
         float expanded_x[] = {1.0f, -1.0f};
-        expanded_query_block.forward(expanded_x, 0, 0, 0, 1);
+        State state(expanded_config);
+        expanded_query_block.forward(expanded_x, 0, 0, 0, 1, state);
         CheckNear(expanded_x[0], 1.0f, "expanded-query residual 0");
         CheckNear(expanded_x[1], -1.0f, "expanded-query residual 1");
 
@@ -116,7 +116,8 @@ int main() {
         Block block(config, MakeWeights());
         float x[] = {1.0f, 2.0f, 3.0f, 4.0f};
         const float rms = std::sqrt(7.5f + config->norm_eps);
-        block.forward(x, 0, 0, 0, 1);
+        state = State(config);
+        block.forward(x, 0, 0, 0, 1, state);
 
         // Both query heads share the only KV head, so both receive the same value.
         CheckNear(x[0], 1.0f + 3.0f / rms, "first attention residual");
@@ -141,7 +142,7 @@ int main() {
 
         bool rejected = false;
         try {
-            block.forward(x, 4, 1, 0, 4);
+            block.forward(x, 4, 1, 0, 4, state);
         } catch (const std::out_of_range&) {
             rejected = true;
         }
