@@ -15,11 +15,13 @@ add_subdirectory(third_party/tokenizers-cpp)
 
 include(CTest)
 
+find_package(OpenMP REQUIRED)
+
 add_library(qwen3_core STATIC
     src/inference.cpp
 )
 target_include_directories(qwen3_core PUBLIC include)
-target_link_libraries(qwen3_core PUBLIC tokenizers_cpp)
+target_link_libraries(qwen3_core PUBLIC tokenizers_cpp OpenMP::OpenMP_CXX)
 
 add_executable(qwen3
     src/main.cpp

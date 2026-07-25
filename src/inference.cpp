@@ -1,7 +1,6 @@
 #include "inference.h"
-
+#include <omp.h>
 #include <tokenizers_cpp.h>
-
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -611,7 +610,7 @@ auto Qwen3::Generate(
         ResetInference();
     }
 
-    std::string model_input;
+    auto model_input = std::string{};
     if (apply_chat_template) {
         model_input = "<|im_start|>user\n";
         model_input.append(prompt);
@@ -631,7 +630,7 @@ auto Qwen3::Generate(
     auto pos = 0;
     const std::vector<float>* logits = nullptr;
     const auto prefill_start = std::chrono::steady_clock::now();
-    State state(transformer_.config);
+    State state(inference_config_);
     for (const auto token : prompt_tokens) {
         logits = &ForwardToken(token, pos++, state);
     }
@@ -758,11 +757,11 @@ auto Block::forward(
     MatMul(v.data(), weights.wv.data(), norm_buffer.data(), kv_dim, c.dim);
 
     for (auto head = 0; head < c.n_heads; ++head) {
-        float* q_head = q.data() + head * c.head_dim;
+        auto* q_head = q.data() + head * c.head_dim;
         RmsNorm(q_head, weights.q_norm.data(), q_head, c.norm_eps, c.head_dim);
     }
     for (auto head = 0; head < c.n_kv_heads; ++head) {
-        float* k_head = k.data() + head * c.head_dim;
+        auto* k_head = k.data() + head * c.head_dim;
         RmsNorm(k_head, weights.k_norm.data(), k_head, c.norm_eps, c.head_dim);
     }
 
@@ -774,7 +773,7 @@ auto Block::forward(
 
     // Keep sink tokens at a constant relative distance after the ring buffer fills.
     for (auto sink = 0; sink < num_sink; ++sink) {
-        float* sink_key = cache.k_.data() + static_cast<std::size_t>(sink) * kv_dim;
+        auto* sink_key = cache.k_.data() + static_cast<std::size_t>(sink) * kv_dim;
         ApplyRotaryEmb(sink_key, kv_dim, c.head_dim, 1, c.rope_theta, c.rotary_dim);
     }
 
@@ -895,6 +894,7 @@ auto MatMul(
     int m
 ) -> void {
     // (n, m) x (m, ) = (n, )
+    #pragma omp parallel for
     for (int i = 0; i < n; i++) {
         auto val = 0.0f;
         for (int j = 0; j < m; j++) {
