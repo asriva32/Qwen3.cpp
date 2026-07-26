@@ -2,7 +2,6 @@ cmake_minimum_required(VERSION 3.20)
 
 project(Qwen3Cpp)
 
-
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -22,6 +21,11 @@ add_library(qwen3_core STATIC
 )
 target_include_directories(qwen3_core PUBLIC include)
 target_link_libraries(qwen3_core PUBLIC tokenizers_cpp OpenMP::OpenMP_CXX)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(qwen3_core PRIVATE -O3 -mavx2 -mfma)
+endif()
+
 
 add_executable(qwen3
     src/main.cpp

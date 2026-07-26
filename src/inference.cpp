@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <immintrin.h>
 #include <limits>
 
 
@@ -793,7 +794,9 @@ auto Block::forward(
     }
 
     const auto queries_per_kv_head = c.n_heads / c.n_kv_heads;
-    for (auto head = 0; head < c.n_heads; ++head) {
+    int head;
+    #pragma omp parallel for private(head)
+    for (head = 0; head < c.n_heads; ++head) {
         const auto kv_head = head / queries_per_kv_head;
         Attn(
             attn_output.data() + head * c.head_dim,
@@ -909,13 +912,44 @@ auto MatMul(
     int m
 ) -> void {
     // (n, m) x (m, ) = (n, )
-    #pragma omp parallel for
-    for (int i = 0; i < n; i++) {
-        auto val = 0.0f;
-        for (int j = 0; j < m; j++) {
-            val += static_cast<float>(w[i * m + j]) * x[j];
+    auto Reduce = [](__m256 value) {
+        const __m128 low  = _mm256_extractf128_ps(value, 0);
+        const __m128 high = _mm256_extractf128_ps(value, 1);
+
+        __m128 sum = _mm_add_ps(low, high);
+        sum = _mm_hadd_ps(sum, sum);
+        sum = _mm_hadd_ps(sum, sum);
+
+        return _mm_cvtss_f32(sum);
+    };
+
+    auto LoadBF16 = [](const std::bfloat16_t *p) {
+        const __m128i tmp = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+        __m256i wide = _mm256_cvtepu16_epi32(tmp);
+        wide = _mm256_slli_epi32(wide, 16);
+        return _mm256_castsi256_ps(wide);
+    };
+    
+    int i;
+    #pragma omp parallel for private(i)
+    for (i = 0; i < n; i++) {
+        const std::bfloat16_t *w_row = w + static_cast<std::size_t>(i) * m;
+        
+        __m256 sum = _mm256_setzero_ps();
+        int j;
+        for (j = 0; j + 16 <= m; j += 16) {
+            __m256 wv_low = LoadBF16(w_row + j);
+            __m256 wv_high = LoadBF16(w_row + j + 8);
+            __m256 xv_low = _mm256_loadu_ps(x + j);
+            __m256 xv_high = _mm256_loadu_ps(x + j + 8);
+
+            sum = _mm256_fmadd_ps(wv_low, xv_low, sum);
+            sum = _mm256_fmadd_ps(wv_high, xv_high, sum);
         }
-        out[i] = val;
+        out[i] = Reduce(sum);
+        for (; j < m; j++) {
+            out[i] += static_cast<float>(w_row[j]) * x[j];
+        }
     }
 }
 

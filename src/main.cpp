@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <omp.h>
 
 namespace {
 
@@ -37,6 +38,7 @@ std::size_t ParseTokenCount(std::string_view value, std::string_view option) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    omp_set_num_threads(8);
     try {
         const std::string model_path = argc > 1 ? argv[1] : "Qwen3.bin";
         const std::string prompt = argc > 2 ? argv[2] : "Hello";
