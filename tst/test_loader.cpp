@@ -34,7 +34,7 @@ int main(int argc, char** argv) {
         Check(model.GetConfig() != nullptr, "missing model config");
         const Config& config = *model.GetConfig();
         Check(config.arch == "Qwen3ForCausalLM", "unexpected architecture");
-        Check(config.dtype == "fp32", "unexpected dtype");
+        Check(config.dtype == "bf16", "unexpected dtype");
         Check(config.dim == 1024, "unexpected dim");
         Check(config.hidden_dim == 3072, "unexpected hidden dim");
         Check(config.head_dim == 128, "unexpected head dim");
@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
         Check(config.tie_word_embeddings, "expected tied embeddings");
         Check(config.qk_norm, "expected q/k norm");
 
-        Check(model.GetTensorIndex().size() == 312, "unexpected tensor record count");
+        Check(model.GetTensorIndex().size() == 313, "unexpected tensor record count");
         Check(model.GetTokenizer().HasBackend(), "tokenizer backend was not initialized");
         Check(static_cast<std::int32_t>(model.GetTokenizer().VocabSize()) == config.vocab_size,
               "tokenizer offset count mismatch");
@@ -61,24 +61,28 @@ int main(int argc, char** argv) {
 
         const std::string embed_name = "model.embed.weight";
         const TensorInfo& embed = FindTensor(model, embed_name);
-        Check(embed.dtype == TensorDType::Float32, "embedding dtype should be fp32");
+        Check(embed.dtype == TensorDType::BFloat16, "embedding dtype should be bf16");
         Check(embed.shape.size() == 2, "embedding should be rank 2");
         Check(embed.shape[0] == config.vocab_size, "embedding vocab dimension mismatch");
         Check(embed.shape[1] == config.dim, "embedding model dimension mismatch");
-        Check(embed.byte_size == 622329856, "embedding byte size mismatch");
+        Check(embed.byte_size == 311164928, "embedding byte size mismatch");
         Check(embed.data_offset > 0, "embedding data offset should be positive");
 
         const std::string qnorm_name = "model.layers.0.attn.q_norm.weight";
         const TensorInfo& qnorm = FindTensor(model, qnorm_name);
-        Check(qnorm.dtype == TensorDType::Float32, "q_norm dtype should be fp32");
+        Check(qnorm.dtype == TensorDType::BFloat16, "q_norm dtype should be bf16");
         Check(qnorm.shape.size() == 1, "q_norm should be rank 1");
         Check(qnorm.shape[0] == config.head_dim, "q_norm shape mismatch");
 
-        const Tensor<float> qnorm_tensor = model.LoadTensor<float>(qnorm_name);
-        Check(static_cast<std::int64_t>(qnorm_tensor.data.size() * sizeof(float)) == qnorm.byte_size,
+        const Tensor<std::bfloat16_t> qnorm_tensor =
+            model.LoadTensor<std::bfloat16_t>(qnorm_name);
+        Check(
+            static_cast<std::int64_t>(
+                qnorm_tensor.data.size() * sizeof(std::bfloat16_t)
+            ) == qnorm.byte_size,
               "q_norm payload size mismatch");
-        Check(qnorm_tensor.ptr() != nullptr, "q_norm fp32 view should not be null");
-        Check(qnorm_tensor.data.size() == config.head_dim, "q_norm fp32 count mismatch");
+        Check(qnorm_tensor.ptr() != nullptr, "q_norm bf16 view should not be null");
+        Check(qnorm_tensor.data.size() == config.head_dim, "q_norm bf16 count mismatch");
 
         std::cout << "loader tests passed\n";
     } catch (const std::exception& error) {

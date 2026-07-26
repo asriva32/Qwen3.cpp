@@ -22,10 +22,20 @@ Run the CLI with:
 ./build/cmake/qwen3 Qwen3.bin "Hello" 512
 ```
 
-Arguments are the model path, prompt, and runtime context length. Add `--raw`
-as the fourth argument to skip Qwen's chat template. Generation continues until
-the model emits its EOS token. The CLI reports prefill and decode throughput.
+Arguments are the model path, prompt, and runtime context length. Generation
+stops at EOS or after 512 generated tokens by default. Set a different limit
+with:
 
-Inference currently uses FP32 weights, a single CPU thread, and greedy sampling.
-The runtime context defaults to 512 tokens so the KV caches do not allocate the
-model's full 40,960-token context.
+```sh
+./build/cmake/qwen3 Qwen3.bin "Hello" 512 --max-tokens 128
+```
+
+For repeatable throughput measurements, `--benchmark N` performs exactly `N`
+decode steps and ignores EOS:
+
+```sh
+./build/cmake/qwen3 Qwen3.bin "Hello" 512 --benchmark 64
+```
+
+Add `--raw` to either command to skip Qwen's chat template. The CLI reports
+prefill and decode throughput plus the reason generation stopped.

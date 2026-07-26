@@ -6,6 +6,7 @@
 #include <cstring>
 #include <string>
 #include <stdexcept>
+#include <stdfloat>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -17,9 +18,10 @@
 namespace tokenizers {
     class Tokenizer;
 }
-
+// needs to match convert.py
 enum class TensorDType : std::uint32_t {
     Float32 = 1,
+    BFloat16 = 3,
     UInt8 = 4,
     Int32 = 5,
 };
@@ -36,7 +38,8 @@ template <typename T>
 concept SupportedTensorElement =
     std::same_as<T, float> ||
     std::same_as<T, std::int32_t> ||
-    std::same_as<T, std::uint8_t>;
+    std::same_as<T, std::uint8_t> ||
+    std::same_as<T, std::bfloat16_t>;
 
 template <SupportedTensorElement T>
 struct Tensor {
@@ -127,8 +130,8 @@ private:
 };
 
 struct KVCache {
-    std::vector<float> k_; // (seq_len, n_kv_heads * head_dim)
-    std::vector<float> v_; // (seq_len, n_kv_heads * head_dim)
+    std::vector<std::bfloat16_t> k_; // (seq_len, n_kv_heads * head_dim)
+    std::vector<std::bfloat16_t> v_; // (seq_len, n_kv_heads * head_dim)
     int seq_len = 0;
     int n_kv_heads = 0;
     int head_dim = 0;
@@ -140,27 +143,28 @@ struct KVCache {
             v_.resize(seq_len * n_kv_heads * head_dim);
         }
 
-    float* GetKCache() {
+    std::bfloat16_t *GetKCache() {
         return k_.data();
     }
 
-    float *GetVCache() {
+    std::bfloat16_t *GetVCache() {
         return v_.data();
     }
 };
 
 struct BlockWeights {
-    std::vector<float> attn_norm;
-    std::vector<float> q_norm;
-    std::vector<float> k_norm;
-    std::vector<float> wq;
-    std::vector<float> wk;
-    std::vector<float> wv;
-    std::vector<float> wo;
-    std::vector<float> mlp_norm;
-    std::vector<float> w1;
-    std::vector<float> w2;
-    std::vector<float> w3;
+    using bf16 = std::bfloat16_t;
+    std::vector<bf16> attn_norm;
+    std::vector<bf16> q_norm;
+    std::vector<bf16> k_norm;
+    std::vector<bf16> wq;
+    std::vector<bf16> wk;
+    std::vector<bf16> wv;
+    std::vector<bf16> wo;
+    std::vector<bf16> mlp_norm;
+    std::vector<bf16> w1;
+    std::vector<bf16> w2;
+    std::vector<bf16> w3;
 };
 
 class Block {
@@ -205,6 +209,7 @@ struct GenerationStats {
     double prefill_seconds = 0.0;
     double decode_seconds = 0.0;
     bool stopped_on_eos = false;
+    bool reached_token_limit = false;
 
     double PrefillTokensPerSecond() const;
     double DecodeTokensPerSecond() const;
@@ -225,7 +230,9 @@ public:
     const std::vector<float>& ForwardToken(std::int32_t token, int pos, State &state);
     GenerationResult Generate(
         std::string_view prompt,
-        bool apply_chat_template = true
+        bool apply_chat_template = true,
+        std::size_t max_generated_tokens = 512,
+        bool stop_on_eos = true
     );
 
     template <SupportedTensorElement T>
@@ -236,15 +243,15 @@ public:
     const Tokenizer& GetTokenizer() const;
 
 private:
-    std::vector<float> LoadFloatData(const std::string& name) const;
+    std::vector<std::bfloat16_t> LoadFloatData(const std::string& name) const;
 
     std::string model_path_;
     Transformer transformer_;
     Tokenizer tokenizer_;
     std::shared_ptr<Config> inference_config_;
-    std::vector<float> embedding_;
-    std::vector<float> final_norm_;
-    std::vector<float> output_;
+    std::vector<std::bfloat16_t> embedding_;
+    std::vector<std::bfloat16_t> final_norm_;
+    std::vector<std::bfloat16_t> output_;
     std::vector<float> hidden_state_;
     std::vector<float> normalized_state_;
     std::vector<float> logits_;
@@ -254,7 +261,9 @@ private:
 
 template <SupportedTensorElement T>
 constexpr TensorDType ExpectedDType() {
-    if constexpr (std::same_as<T, float>) {
+    if constexpr (std::same_as<T, std::bfloat16_t>) {
+        return TensorDType::BFloat16;
+    } else if constexpr (std::same_as<T, float>) {
         return TensorDType::Float32;
     } else if constexpr (std::same_as<T, std::int32_t>) {
         return TensorDType::Int32;
@@ -291,12 +300,12 @@ Tensor<T> Qwen3::LoadTensor(const std::string& name) const {
     return Tensor<T>{info, std::move(data)};
 }
 
-void RmsNorm(const float *x, const float *weights, float *out, float eps, int n);
+void RmsNorm(const float *x, const std::bfloat16_t *weights, float *out, float eps, int n);
 void Softmax(const float *x, float *out, int n);
 float Gelu(float x);
 float Silu(float x);
-void MatMul(float *out, const float *x, const float *y, int n, int m);
+void MatMul(float *out, const float *x, const std::bfloat16_t *y, int n, int m);
 void ApplyRotaryEmb(float *out, int d, int head_dim, int pos, float theta, int rotary_dim);
-void FeedForwardNetwork(float *out, float *lin1, float *lin2, const float *x, const float *w1, const float *w2, const float *w3, int hidden_dim, int dim);
-void Attn(float *out, float *atth, const float *q, const float *k, const float *v, int head_dim, int n_kv_heads, int kv_len);
+void FeedForwardNetwork(float *out, float *lin1, float *lin2, const float *x, const std::bfloat16_t *w1, const std::bfloat16_t *w2, const std::bfloat16_t *w3, int hidden_dim, int dim);
+void Attn(float *out, float *atth, const float *q, const std::bfloat16_t *k, const std::bfloat16_t *v, int head_dim, int n_kv_heads, int kv_len);
 #endif

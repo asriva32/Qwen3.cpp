@@ -62,6 +62,8 @@ auto DTypeSize(TensorDType dtype) -> std::size_t {
     switch (dtype) {
         case TensorDType::Float32:
             return 4;
+        case TensorDType::BFloat16:
+            return 2;
         case TensorDType::UInt8:
             return 1;
         case TensorDType::Int32:
@@ -226,8 +228,8 @@ auto ValidateSupportedTensorType(const TensorInfo& info) -> void {
         throw std::runtime_error("Unsupported tokenizer tensor dtype for " + info.name);
     }
 
-    if (info.dtype != TensorDType::Float32) {
-        throw std::runtime_error("Only fp32 model tensors are supported: " + info.name);
+    if (info.dtype != TensorDType::BFloat16) {
+        throw std::runtime_error("Only bf16 model tensors are supported: " + info.name);
     }
 }
 
@@ -422,8 +424,8 @@ auto Qwen3::Load(const std::string& path) -> void {
     const auto metadata_size = ReadPod<std::uint64_t>(in);
     const auto metadata_json = ReadString(in, metadata_size);
     transformer_.config = std::make_shared<Config>(ParseConfig(metadata_json));
-    if (transformer_.config->dtype != "fp32") {
-        throw std::runtime_error("Only fp32 Qwen3.bin files are supported");
+    if (transformer_.config->dtype != "bf16") {
+        throw std::runtime_error("Only bf16 Qwen3.bin files are supported");
     }
 
     inference_initialized_ = false;
@@ -480,8 +482,8 @@ auto Qwen3::GetTokenizer() const -> const Tokenizer& {
     return tokenizer_;
 }
 
-auto Qwen3::LoadFloatData(const std::string& name) const -> std::vector<float> {
-    return LoadTensor<float>(name).data;
+auto Qwen3::LoadFloatData(const std::string& name) const -> std::vector<std::bfloat16_t> {
+    return LoadTensor<std::bfloat16_t>(name).data;
 }
 
 auto Qwen3::InitializeInference(int context_length) -> void {
@@ -592,8 +594,8 @@ auto Qwen3::ForwardToken(std::int32_t token, int pos, State &state) -> const std
         : output_.data();
     MatMul(
         logits_.data(),
-        classifier,
         normalized_state_.data(),
+        classifier,
         model_config.vocab_size,
         model_config.dim
     );
@@ -602,7 +604,9 @@ auto Qwen3::ForwardToken(std::int32_t token, int pos, State &state) -> const std
 
 auto Qwen3::Generate(
     std::string_view prompt,
-    bool apply_chat_template
+    bool apply_chat_template,
+    std::size_t max_generated_tokens,
+    bool stop_on_eos
 ) -> GenerationResult {
     if (!inference_initialized_) {
         InitializeInference();
@@ -639,9 +643,9 @@ auto Qwen3::Generate(
         std::chrono::duration<double>(prefill_end - prefill_start).count();
 
     const auto decode_start = std::chrono::steady_clock::now();
-    while (true) {
+    while (result.tokens.size() < max_generated_tokens) {
         const auto token = Sampler::Greedy(*logits);
-        if (token == transformer_.config->eos_token_id) {
+        if (stop_on_eos && token == transformer_.config->eos_token_id) {
             result.stats.stopped_on_eos = true;
             break;
         }
@@ -650,6 +654,9 @@ auto Qwen3::Generate(
     }
     const auto decode_end = std::chrono::steady_clock::now();
     result.stats.generated_tokens = result.tokens.size();
+    result.stats.reached_token_limit =
+        !result.stats.stopped_on_eos &&
+        result.tokens.size() == max_generated_tokens;
     result.stats.decode_seconds =
         std::chrono::duration<double>(decode_end - decode_start).count();
     result.text = tokenizer_.Decode(result.tokens);
@@ -700,7 +707,7 @@ auto Block::ValidateWeights() const -> void {
     const auto q_dim = static_cast<std::size_t>(config->n_heads) * head_dim;
     const auto kv_dim = static_cast<std::size_t>(config->n_kv_heads) * head_dim;
 
-    const auto require_size = [](const std::vector<float>& weight, std::size_t expected,
+    const auto require_size = [](const std::vector<std::bfloat16_t>& weight, std::size_t expected,
                                  const char* name) {
         if (weight.size() != expected) {
             throw std::invalid_argument(
@@ -752,9 +759,9 @@ auto Block::forward(
     const auto kv_dim = c.n_kv_heads * c.head_dim;
 
     RmsNorm(x, weights.attn_norm.data(), norm_buffer.data(), c.norm_eps, c.dim);
-    MatMul(q.data(), weights.wq.data(), norm_buffer.data(), q_dim, c.dim);
-    MatMul(k.data(), weights.wk.data(), norm_buffer.data(), kv_dim, c.dim);
-    MatMul(v.data(), weights.wv.data(), norm_buffer.data(), kv_dim, c.dim);
+    MatMul(q.data(), norm_buffer.data(), weights.wq.data(), q_dim, c.dim);
+    MatMul(k.data(), norm_buffer.data(), weights.wk.data(), kv_dim, c.dim);
+    MatMul(v.data(), norm_buffer.data(), weights.wv.data(), kv_dim, c.dim);
 
     for (auto head = 0; head < c.n_heads; ++head) {
         auto* q_head = q.data() + head * c.head_dim;
@@ -768,13 +775,21 @@ auto Block::forward(
     ApplyRotaryEmb(q.data(), q_dim, c.head_dim, pos, c.rope_theta, c.rotary_dim);
     ApplyRotaryEmb(k.data(), kv_dim, c.head_dim, pos, c.rope_theta, c.rotary_dim);
 
-    std::copy(k.begin(), k.end(), cache.k_.begin() + static_cast<std::size_t>(kv_pos) * kv_dim);
-    std::copy(v.begin(), v.end(), cache.v_.begin() + static_cast<std::size_t>(kv_pos) * kv_dim);
+    for (auto i = 0; i < kv_dim; i++) {
+        cache.k_[i + kv_pos * kv_dim] = static_cast<std::bfloat16_t>(k[i]);
+        cache.v_[i + kv_pos * kv_dim] = static_cast<std::bfloat16_t>(v[i]);
+    }
 
     // Keep sink tokens at a constant relative distance after the ring buffer fills.
     for (auto sink = 0; sink < num_sink; ++sink) {
-        auto* sink_key = cache.k_.data() + static_cast<std::size_t>(sink) * kv_dim;
-        ApplyRotaryEmb(sink_key, kv_dim, c.head_dim, 1, c.rope_theta, c.rotary_dim);
+        for (auto i = 0; i < kv_dim; i++) {
+            k[i] = static_cast<float>(cache.k_[sink * kv_dim + i]);
+        }
+        ApplyRotaryEmb(k.data(), kv_dim, c.head_dim, 1, c.rope_theta, c.rotary_dim);
+
+        for (auto i = 0; i < kv_dim; i++) {
+            cache.k_[sink * kv_dim + i] = static_cast<std::bfloat16_t>(k[i]);
+        }
     }
 
     const auto queries_per_kv_head = c.n_heads / c.n_kv_heads;
@@ -792,7 +807,7 @@ auto Block::forward(
         );
     }
 
-    MatMul(projected.data(), weights.wo.data(), attn_output.data(), c.dim, q_dim);
+    MatMul(projected.data(), attn_output.data(), weights.wo.data(), c.dim, q_dim);
     for (auto i = 0; i < c.dim; ++i) {
         x[i] += projected[i];
     }
@@ -835,7 +850,7 @@ State::State(const std::shared_ptr<Config> &c) {
 
 auto RmsNorm(
     const float *x, 
-    const float *weights, 
+    const std::bfloat16_t *weights, 
     float *out,
     float eps,
     int n
@@ -850,7 +865,7 @@ auto RmsNorm(
     const auto inverse_rms = 1.0f / rms;
 
     for (auto i = 0; i < n; i++) {
-        out[i] = x[i] * inverse_rms * weights[i];
+        out[i] = x[i] * inverse_rms * static_cast<float>(weights[i]);
     }
 
 }
@@ -861,7 +876,7 @@ auto Softmax(
     int    n
 ) -> void {
 
-    auto mx_score = -std::numeric_limits<float>::infinity();
+    auto mx_score = std::numeric_limits<float>::lowest();
     for (int i = 0; i < n; i++) {
         mx_score = std::max(mx_score, x[i]);
     }
@@ -889,7 +904,7 @@ auto Silu(float x) -> float {
 auto MatMul(
     float *out,
     const float* x, 
-    const float* y,
+    const std::bfloat16_t* w,
     int n,
     int m
 ) -> void {
@@ -898,7 +913,7 @@ auto MatMul(
     for (int i = 0; i < n; i++) {
         auto val = 0.0f;
         for (int j = 0; j < m; j++) {
-            val += x[i * m + j] * y[j];
+            val += static_cast<float>(w[i * m + j]) * x[j];
         }
         out[i] = val;
     }
@@ -934,22 +949,22 @@ auto FeedForwardNetwork(
     float *lin1,
     float *lin2,
     const float *x,
-    const float *w1,
-    const float *w2,
-    const float *w3,
+    const std::bfloat16_t *w1,
+    const std::bfloat16_t *w2,
+    const std::bfloat16_t *w3,
     int hidden_dim,
     int dim
 ) -> void {
     
-    MatMul(lin1, w1, x, hidden_dim, dim);
-    MatMul(lin2, w3, x, hidden_dim, dim);
+    MatMul(lin1, x, w1, hidden_dim, dim);
+    MatMul(lin2, x, w3, hidden_dim, dim);
     
     // this is like siluAndMul (?) 
     for (auto i = 0; i < hidden_dim; i++) {
         lin1[i] = Silu(lin1[i]) * lin2[i];
     }
 
-    MatMul(out, w2, lin1, dim, hidden_dim);
+    MatMul(out, lin1, w2, dim, hidden_dim);
     
 }
 
@@ -957,8 +972,8 @@ auto Attn(
     float *out, // (dim, )
     float *atth, // (kv_len, ) - to hold attn scores
     const float *q, // (head_dim, )
-    const float *k, // (kv_len, n_kv_heads, head_dim)
-    const float *v, // (kv_len, n_kv_heads, head_dim)
+    const std::bfloat16_t *k, // (kv_len, n_kv_heads, head_dim)
+    const std::bfloat16_t *v, // (kv_len, n_kv_heads, head_dim)
     int head_dim,
     int n_kv_heads,
     int kv_len
@@ -968,7 +983,7 @@ auto Attn(
     for (auto i = 0; i < kv_len; i++) {
         auto score = 0.0f;
         for (auto j = 0; j < head_dim; j++) {
-            score += q[j] * k[i * stride + j];
+            score += q[j] * static_cast<float>(k[i * stride + j]);
         }
         score /= sqrt_head_dim;
         atth[i] = score;
@@ -979,7 +994,7 @@ auto Attn(
     for (auto i = 0; i < head_dim; i++) {
         auto res = 0.0f;
         for (auto j = 0; j < kv_len; j++) {
-            res += atth[j] * v[j * stride + i];
+            res += atth[j] * static_cast<float>(v[j * stride + i]);
         }
         out[i] = res;
     }

@@ -217,37 +217,35 @@ def target_dtype(dtype: str) -> torch.dtype:
     }[dtype]
 
 
-def convert_weight(tensor: torch.Tensor, dtype: str, keep_fp32: bool = False) -> torch.Tensor:
-    if keep_fp32:
-        return tensor.to(torch.float32).contiguous()
+def convert_weight(tensor: torch.Tensor, dtype: str) -> torch.Tensor:
     return tensor.to(target_dtype(dtype)).contiguous()
 
 
-def tensor_plan(metadata: Metadata) -> list[tuple[str, str, bool]]:
-    plan: list[tuple[str, str, bool]] = [
-        ("model.embed.weight", "model.embed_tokens.weight", False),
+def tensor_plan(metadata: Metadata) -> list[tuple[str, str]]:
+    plan: list[tuple[str, str]] = [
+        ("model.embed.weight", "model.embed_tokens.weight"),
     ]
     for layer in range(metadata.n_layers):
         src_prefix = f"model.layers.{layer}"
         dst_prefix = f"model.layers.{layer}"
         plan.extend(
             [
-                (f"{dst_prefix}.attn.norm.weight", f"{src_prefix}.input_layernorm.weight", True),
-                (f"{dst_prefix}.attn.q_norm.weight", f"{src_prefix}.self_attn.q_norm.weight", True),
-                (f"{dst_prefix}.attn.k_norm.weight", f"{src_prefix}.self_attn.k_norm.weight", True),
-                (f"{dst_prefix}.attn.wq.weight", f"{src_prefix}.self_attn.q_proj.weight", False),
-                (f"{dst_prefix}.attn.wk.weight", f"{src_prefix}.self_attn.k_proj.weight", False),
-                (f"{dst_prefix}.attn.wv.weight", f"{src_prefix}.self_attn.v_proj.weight", False),
-                (f"{dst_prefix}.attn.wo.weight", f"{src_prefix}.self_attn.o_proj.weight", False),
-                (f"{dst_prefix}.mlp.norm.weight", f"{src_prefix}.post_attention_layernorm.weight", True),
-                (f"{dst_prefix}.mlp.w1.weight", f"{src_prefix}.mlp.gate_proj.weight", False),
-                (f"{dst_prefix}.mlp.w2.weight", f"{src_prefix}.mlp.down_proj.weight", False),
-                (f"{dst_prefix}.mlp.w3.weight", f"{src_prefix}.mlp.up_proj.weight", False),
+                (f"{dst_prefix}.attn.norm.weight", f"{src_prefix}.input_layernorm.weight"),
+                (f"{dst_prefix}.attn.q_norm.weight", f"{src_prefix}.self_attn.q_norm.weight"),
+                (f"{dst_prefix}.attn.k_norm.weight", f"{src_prefix}.self_attn.k_norm.weight"),
+                (f"{dst_prefix}.attn.wq.weight", f"{src_prefix}.self_attn.q_proj.weight"),
+                (f"{dst_prefix}.attn.wk.weight", f"{src_prefix}.self_attn.k_proj.weight"),
+                (f"{dst_prefix}.attn.wv.weight", f"{src_prefix}.self_attn.v_proj.weight"),
+                (f"{dst_prefix}.attn.wo.weight", f"{src_prefix}.self_attn.o_proj.weight"),
+                (f"{dst_prefix}.mlp.norm.weight", f"{src_prefix}.post_attention_layernorm.weight"),
+                (f"{dst_prefix}.mlp.w1.weight", f"{src_prefix}.mlp.gate_proj.weight"),
+                (f"{dst_prefix}.mlp.w2.weight", f"{src_prefix}.mlp.down_proj.weight"),
+                (f"{dst_prefix}.mlp.w3.weight", f"{src_prefix}.mlp.up_proj.weight"),
             ]
         )
-    plan.append(("model.norm.weight", "model.norm.weight", True))
+    plan.append(("model.norm.weight", "model.norm.weight"))
     if not metadata.tie_word_embeddings:
-        plan.append(("model.output.weight", "lm_head.weight", False))
+        plan.append(("model.output.weight", "lm_head.weight"))
     return plan
 
 
@@ -293,8 +291,8 @@ def convert(input_dir: Path, output_path: Path, dtype: str) -> None:
         out.write(metadata_bytes)
         out.write(struct.pack("<Q", tensor_count))
 
-        for idx, (dst, src, keep_fp32) in enumerate(plan, 1):
-            tensor = convert_weight(store.get(src), dtype, keep_fp32=keep_fp32)
+        for idx, (dst, src) in enumerate(plan, 1):
+            tensor = convert_weight(store.get(src), dtype)
             print(f"[{idx}/{tensor_count}] {dst} {tuple(tensor.shape)} {tensor.dtype}")
             write_tensor(out, dst, tensor)
 
