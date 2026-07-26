@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <concepts>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <stdexcept>
 #include <stdfloat>
@@ -232,7 +233,8 @@ public:
         std::string_view prompt,
         bool apply_chat_template = true,
         std::size_t max_generated_tokens = 512,
-        bool stop_on_eos = true
+        bool stop_on_eos = true,
+        const std::function<void(std::span<const std::int32_t>)>& on_tokens = {}
     );
 
     template <SupportedTensorElement T>

@@ -35,6 +35,16 @@ std::size_t ParseTokenCount(std::string_view value, std::string_view option) {
     return count;
 }
 
+std::size_t CompleteDecodedSize(std::string_view text) {
+    constexpr auto replacement = std::string_view{"\xef\xbf\xbd"};
+    auto size = text.size();
+    while (size >= replacement.size() &&
+           text.substr(0, size).ends_with(replacement)) {
+        size -= replacement.size();
+    }
+    return size;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -101,13 +111,33 @@ int main(int argc, char** argv) {
             std::cout << "Fixed-token benchmark: " << max_generated_tokens
                       << " decode steps\n";
         }
+        auto streamed_text = std::string{};
+        const auto stream_tokens =
+            [&model, &streamed_text](std::span<const std::int32_t> tokens) {
+                const auto decoded = model.GetTokenizer().Decode(tokens);
+                const auto complete_size = CompleteDecodedSize(decoded);
+                if (complete_size < streamed_text.size() ||
+                    decoded.compare(0, streamed_text.size(), streamed_text) != 0) {
+                    return;
+                }
+                std::cout.write(
+                    decoded.data() + streamed_text.size(),
+                    static_cast<std::streamsize>(complete_size - streamed_text.size())
+                );
+                std::cout.flush();
+                streamed_text.assign(decoded.data(), complete_size);
+            };
         const GenerationResult result = model.Generate(
             prompt,
             apply_chat_template,
             max_generated_tokens,
-            stop_on_eos
+            stop_on_eos,
+            stream_tokens
         );
-        std::cout << result.text << '\n';
+        if (result.text.starts_with(streamed_text)) {
+            std::cout << std::string_view(result.text).substr(streamed_text.size());
+        }
+        std::cout << '\n';
         std::cout << std::fixed << std::setprecision(2)
                   << "prefill: " << result.stats.prompt_tokens << " tokens, "
                   << result.stats.prefill_seconds << " s, "

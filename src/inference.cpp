@@ -607,7 +607,8 @@ auto Qwen3::Generate(
     std::string_view prompt,
     bool apply_chat_template,
     std::size_t max_generated_tokens,
-    bool stop_on_eos
+    bool stop_on_eos,
+    const std::function<void(std::span<const std::int32_t>)>& on_tokens
 ) -> GenerationResult {
     if (!inference_initialized_) {
         InitializeInference();
@@ -651,6 +652,9 @@ auto Qwen3::Generate(
             break;
         }
         result.tokens.push_back(token);
+        if (on_tokens) {
+            on_tokens(result.tokens);
+        }
         logits = &ForwardToken(token, pos++, state);
     }
     const auto decode_end = std::chrono::steady_clock::now();

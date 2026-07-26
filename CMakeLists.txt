@@ -23,7 +23,7 @@ target_include_directories(qwen3_core PUBLIC include)
 target_link_libraries(qwen3_core PUBLIC tokenizers_cpp OpenMP::OpenMP_CXX)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(qwen3_core PRIVATE -O3 -mavx2 -mfma)
+    target_compile_options(qwen3_core PRIVATE -O3 -mavx2 -mfma -march=native)
 endif()
 
 
