@@ -45,3 +45,5 @@ decode steps and ignores EOS:
 
 Add `--raw` to either command to skip Qwen's chat template. The CLI reports
 prefill and decode throughput plus the reason generation stopped.
+
+To specify number of threads to use, `--threads N` uses N threads. It is recommended to play around with this number for maximum performance.
