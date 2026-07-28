@@ -262,6 +262,46 @@ auto ReadTensorBytes(
     return data;
 }
 
+// ----- SIMD Helpers -----
+
+auto Reduce(__m256 value) -> float {
+    const __m128 low  = _mm256_extractf128_ps(value, 0);
+    const __m128 high = _mm256_extractf128_ps(value, 1);
+
+    __m128 sum = _mm_add_ps(low, high);
+    sum = _mm_hadd_ps(sum, sum);
+    sum = _mm_hadd_ps(sum, sum);
+
+    return _mm_cvtss_f32(sum);
+};
+
+auto LoadBF16(const std::bfloat16_t *p) -> __m256 {
+    const __m128i tmp = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+    __m256i wide = _mm256_cvtepu16_epi32(tmp);
+    wide = _mm256_slli_epi32(wide, 16);
+    return _mm256_castsi256_ps(wide);
+};
+
+auto FastDotProduct(const std::bfloat16_t *w_row, const float *x, int m) -> float {
+    __m256 sum_low = _mm256_setzero_ps();
+    __m256 sum_high = _mm256_setzero_ps();
+    int j = 0;
+    for (; j + 16 <= m; j += 16) {
+        __m256 wv_low = LoadBF16(w_row + j);
+        __m256 wv_high = LoadBF16(w_row + j + 8);
+        __m256 xv_low = _mm256_loadu_ps(x + j);
+        __m256 xv_high = _mm256_loadu_ps(x + j + 8);
+
+        sum_low = _mm256_fmadd_ps(wv_low, xv_low, sum_low);
+        sum_high = _mm256_fmadd_ps(wv_high, xv_high, sum_high);
+    }
+    float sum = Reduce(_mm256_add_ps(sum_low, sum_high));
+    for (; j < m; j++) {
+        sum += static_cast<float>(w_row[j]) * x[j];
+    }
+    return sum;
+};
+
 }  // namespace
 
 auto LoadTensorBytes(
@@ -854,22 +894,38 @@ State::State(const std::shared_ptr<Config> &c) {
 
 auto RmsNorm(
     const float *x, 
-    const std::bfloat16_t *weights, 
+    const std::bfloat16_t *w, 
     float *out,
     float eps,
     int n
 ) -> void {
     
-    auto rms = 0.0f;
-    for (int i = 0; i < n; i++) {
+    __m256 rms_vec = _mm256_setzero_ps();
+    auto i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 x_vec = _mm256_loadu_ps(x + i);
+        rms_vec = _mm256_fmadd_ps(x_vec, x_vec, rms_vec);
+    }
+    auto rms = Reduce(rms_vec);
+    for (; i < n; i++) {
         rms += x[i] * x[i];
     }
     rms = sqrtf(rms / n + eps);
     
     const auto inverse_rms = 1.0f / rms;
+    __m256 inverse_rms_vec = _mm256_set1_ps(inverse_rms);
+    auto j = 0;
+    for (; j + 8 <= n; j += 8) {
+        __m256 value  = _mm256_setzero_ps();
+        __m256 w_vec  = LoadBF16(w + j);
+        __m256 x_vec  = _mm256_loadu_ps(x + j);
 
-    for (auto i = 0; i < n; i++) {
-        out[i] = x[i] * inverse_rms * static_cast<float>(weights[i]);
+        value = _mm256_mul_ps(x_vec, inverse_rms_vec);
+        value = _mm256_mul_ps(value, w_vec);
+        _mm256_storeu_ps(out + j, value);
+    }
+    for (; j < n; j++) {
+        out[j] = x[j] * inverse_rms * static_cast<float>(w[j]);
     }
 
 }
@@ -897,51 +953,9 @@ auto Softmax(
 
 }
 
-auto Gelu(float x) -> float {
-    return 0.5f * x * (1.0f + tanhf(0.797885f * (x + 0.044715f * x * x * x)));
-}
-
 auto Silu(float x) -> float {
     return x / (1.0f + expf(-x));
 }
-
-auto Reduce(__m256 value) -> float {
-    const __m128 low  = _mm256_extractf128_ps(value, 0);
-    const __m128 high = _mm256_extractf128_ps(value, 1);
-
-    __m128 sum = _mm_add_ps(low, high);
-    sum = _mm_hadd_ps(sum, sum);
-    sum = _mm_hadd_ps(sum, sum);
-
-    return _mm_cvtss_f32(sum);
-};
-
-auto LoadBF16(const std::bfloat16_t *p) -> __m256 {
-    const __m128i tmp = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
-    __m256i wide = _mm256_cvtepu16_epi32(tmp);
-    wide = _mm256_slli_epi32(wide, 16);
-    return _mm256_castsi256_ps(wide);
-};
-
-auto FastDotProduct(const std::bfloat16_t *w_row, const float *x, int m) -> float {
-    __m256 sum_low = _mm256_setzero_ps();
-    __m256 sum_high = _mm256_setzero_ps();
-    int j = 0;
-    for (; j + 16 <= m; j += 16) {
-        __m256 wv_low = LoadBF16(w_row + j);
-        __m256 wv_high = LoadBF16(w_row + j + 8);
-        __m256 xv_low = _mm256_loadu_ps(x + j);
-        __m256 xv_high = _mm256_loadu_ps(x + j + 8);
-
-        sum_low = _mm256_fmadd_ps(wv_low, xv_low, sum_low);
-        sum_high = _mm256_fmadd_ps(wv_high, xv_high, sum_high);
-    }
-    float sum = Reduce(_mm256_add_ps(sum_low, sum_high));
-    for (; j < m; j++) {
-        sum += static_cast<float>(w_row[j]) * x[j];
-    }
-    return sum;
-};
 
 auto MatMul(
     float *out,
@@ -1008,6 +1022,36 @@ auto FeedForwardNetwork(
     
 }
 
+auto FastAttn(
+    float *out, // (dim, )
+    float *atth, // (kv_len, ) - to hold attn scores
+    const float *q, // (head_dim, )
+    const std::bfloat16_t *k, // (kv_len, n_kv_heads, head_dim)
+    const std::bfloat16_t *v, // (kv_len, n_kv_heads, head_dim)
+    int head_dim,
+    int n_kv_heads,
+    int kv_len
+) -> void {
+    const auto stride = n_kv_heads * head_dim;
+    const auto sqrt_head_dim = sqrtf(head_dim);
+    for (auto i = 0; i < kv_len; i++) {
+        const auto *k_row = k + static_cast<size_t>(i) * stride;  
+        auto score = FastDotProduct(k_row, q, head_dim);
+        score /= sqrt_head_dim;
+        atth[i] = score;
+    }
+
+    Softmax(atth, atth, kv_len);
+
+    for (auto i = 0; i < head_dim; i++) {
+        auto res = 0.0f;
+        for (auto j = 0; j < kv_len; j++) {
+            res += atth[j] * static_cast<float>(v[j * stride + i]);
+        }
+        out[i] = res;
+    }
+}
+
 auto Attn(
     float *out, // (dim, )
     float *atth, // (kv_len, ) - to hold attn scores
@@ -1025,38 +1069,6 @@ auto Attn(
         for (auto j = 0; j < head_dim; j++) {
             score += q[j] * static_cast<float>(k[i * stride + j]);
         }
-        score /= sqrt_head_dim;
-        atth[i] = score;
-    }
-
-    Softmax(atth, atth, kv_len);
-
-    for (auto i = 0; i < head_dim; i++) {
-        auto res = 0.0f;
-        for (auto j = 0; j < kv_len; j++) {
-            res += atth[j] * static_cast<float>(v[j * stride + i]);
-        }
-        out[i] = res;
-    }
-}
-
-auto FastAttn(
-    float *out, // (dim, )
-    float *atth, // (kv_len, ) - to hold attn scores
-    const float *q, // (head_dim, )
-    const std::bfloat16_t *k, // (kv_len, n_kv_heads, head_dim)
-    const std::bfloat16_t *v, // (kv_len, n_kv_heads, head_dim)
-    int head_dim,
-    int n_kv_heads,
-    int kv_len
-) -> void {
-    const auto stride = n_kv_heads * head_dim;
-    const auto sqrt_head_dim = sqrtf(head_dim);
-    for (auto i = 0; i < kv_len; i++) {
-        const auto *k_row = k + static_cast<size_t>(i) * stride;  
-        
-
-        auto score = FastDotProduct(k_row, q, head_dim);
         score /= sqrt_head_dim;
         atth[i] = score;
     }

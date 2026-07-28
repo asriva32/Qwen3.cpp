@@ -302,13 +302,12 @@ Tensor<T> Qwen3::LoadTensor(const std::string& name) const {
     return Tensor<T>{info, std::move(data)};
 }
 
-void RmsNorm(const float *x, const std::bfloat16_t *weights, float *out, float eps, int n);
-void Softmax(const float *x, float *out, int n);
-float Gelu(float x);
+void  RmsNorm(const float *x, const std::bfloat16_t *weights, float *out, float eps, int n);
+void  Softmax(const float *x, float *out, int n);
 float Silu(float x);
-void MatMul(float *out, const float *x, const std::bfloat16_t *y, int n, int m);
-void ApplyRotaryEmb(float *out, int d, int head_dim, int pos, float theta, int rotary_dim);
-void FeedForwardNetwork(float *out, float *lin1, float *lin2, const float *x, const std::bfloat16_t *w1, const std::bfloat16_t *w2, const std::bfloat16_t *w3, int hidden_dim, int dim);
-void Attn(float *out, float *atth, const float *q, const std::bfloat16_t *k, const std::bfloat16_t *v, int head_dim, int n_kv_heads, int kv_len);
-void FastAttn(float *out, float *atth, const float *q, const std::bfloat16_t *k, const std::bfloat16_t *v, int head_dim, int n_kv_heads, int kv_len);
+void  MatMul(float *out, const float *x, const std::bfloat16_t *y, int n, int m);
+void  ApplyRotaryEmb(float *out, int d, int head_dim, int pos, float theta, int rotary_dim);
+void  FeedForwardNetwork(float *out, float *lin1, float *lin2, const float *x, const std::bfloat16_t *w1, const std::bfloat16_t *w2, const std::bfloat16_t *w3, int hidden_dim, int dim);
+void  Attn(float *out, float *atth, const float *q, const std::bfloat16_t *k, const std::bfloat16_t *v, int head_dim, int n_kv_heads, int kv_len);
+void  FastAttn(float *out, float *atth, const float *q, const std::bfloat16_t *k, const std::bfloat16_t *v, int head_dim, int n_kv_heads, int kv_len);
 #endif
