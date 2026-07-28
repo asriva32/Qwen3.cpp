@@ -2,7 +2,11 @@
 Single file inference of Qwen3 0.6B
 Currently has a dependency on https://github.com/mlc-ai/tokenizers-cpp (probably need rust installed)
 Will try to remove this dependency in the future
-Or take tokens from hugging face tokenizer
+
+## Requirements
+Need gcc version that supports C++ 23
+Need rust installed
+
 ## Build
 
 ```sh

@@ -30,9 +30,9 @@ enum class TensorDType : std::uint32_t {
 struct TensorInfo {
     std::string name;
     TensorDType dtype;
-    std::vector<std::size_t> shape;
-    std::size_t data_offset = 0;
-    std::size_t byte_size = 0;
+    std::vector<size_t> shape;
+    size_t data_offset = 0;
+    size_t byte_size = 0;
 };
 
 template <typename T>
@@ -116,7 +116,7 @@ public:
     void LoadFromJsonFile(const std::string& path);
     void SetSpecialTokenIds(const Config& config);
     bool HasBackend() const;
-    std::size_t VocabSize() const;
+    size_t VocabSize() const;
     std::int32_t BosTokenId() const;
     std::int32_t EosTokenId() const;
 
@@ -205,8 +205,8 @@ public:
 };
 
 struct GenerationStats {
-    std::size_t prompt_tokens = 0;
-    std::size_t generated_tokens = 0;
+    size_t prompt_tokens = 0;
+    size_t generated_tokens = 0;
     double prefill_seconds = 0.0;
     double decode_seconds = 0.0;
     bool stopped_on_eos = false;
@@ -232,7 +232,7 @@ public:
     GenerationResult Generate(
         std::string_view prompt,
         bool apply_chat_template = true,
-        std::size_t max_generated_tokens = 512,
+        size_t max_generated_tokens = 512,
         bool stop_on_eos = true,
         const std::function<void(std::span<const std::int32_t>)>& on_tokens = {}
     );
@@ -278,7 +278,7 @@ std::vector<std::uint8_t> LoadTensorBytes(
     const std::string& path,
     const TensorInfo& info,
     TensorDType expected_dtype,
-    std::size_t element_size
+    size_t element_size
 );
 
 
@@ -310,4 +310,5 @@ void MatMul(float *out, const float *x, const std::bfloat16_t *y, int n, int m);
 void ApplyRotaryEmb(float *out, int d, int head_dim, int pos, float theta, int rotary_dim);
 void FeedForwardNetwork(float *out, float *lin1, float *lin2, const float *x, const std::bfloat16_t *w1, const std::bfloat16_t *w2, const std::bfloat16_t *w3, int hidden_dim, int dim);
 void Attn(float *out, float *atth, const float *q, const std::bfloat16_t *k, const std::bfloat16_t *v, int head_dim, int n_kv_heads, int kv_len);
+void FastAttn(float *out, float *atth, const float *q, const std::bfloat16_t *k, const std::bfloat16_t *v, int head_dim, int n_kv_heads, int kv_len);
 #endif

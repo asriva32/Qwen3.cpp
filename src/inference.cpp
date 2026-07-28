@@ -28,11 +28,11 @@ auto ReadPod(std::istream& in) -> T {
 }
 
 auto ReadString(std::istream& in, std::uint64_t size) -> std::string {
-    if (size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    if (size > static_cast<std::uint64_t>(std::numeric_limits<size_t>::max())) {
         throw std::runtime_error("String record is too large for this platform");
     }
 
-    std::string value(static_cast<std::size_t>(size), '\0');
+    std::string value(static_cast<size_t>(size), '\0');
     in.read(value.data(), static_cast<std::streamsize>(value.size()));
     if (!in) {
         throw std::runtime_error("Unexpected end of Qwen3.bin while reading string");
@@ -40,17 +40,15 @@ auto ReadString(std::istream& in, std::uint64_t size) -> std::string {
     return value;
 }
 
-
-
-auto CheckedSize(std::size_t value, const std::string& field) -> std::size_t {
-    if (value > std::numeric_limits<std::size_t>::max()) {
+auto CheckedSize(size_t value, const std::string& field) -> size_t {
+    if (value > std::numeric_limits<size_t>::max()) {
         throw std::runtime_error(field + " does not fit in size_t");
     }
-    return static_cast<std::size_t>(value);
+    return static_cast<size_t>(value);
 }
 
-auto SkipBytes(std::istream& in, std::size_t bytes) -> void {
-    if (bytes > static_cast<std::size_t>(std::numeric_limits<std::streamoff>::max())) {
+auto SkipBytes(std::istream& in, size_t bytes) -> void {
+    if (bytes > static_cast<size_t>(std::numeric_limits<std::streamoff>::max())) {
         throw std::runtime_error("Tensor payload is too large to seek over");
     }
     in.seekg(static_cast<std::streamoff>(bytes), std::ios::cur);
@@ -59,7 +57,7 @@ auto SkipBytes(std::istream& in, std::size_t bytes) -> void {
     }
 }
 
-auto DTypeSize(TensorDType dtype) -> std::size_t {
+auto DTypeSize(TensorDType dtype) -> size_t {
     switch (dtype) {
         case TensorDType::Float32:
             return 4;
@@ -73,10 +71,10 @@ auto DTypeSize(TensorDType dtype) -> std::size_t {
     throw std::runtime_error("Unknown tensor dtype");
 }
 
-auto ShapeElementCount(const std::vector<std::size_t>& shape) -> std::size_t {
+auto ShapeElementCount(const std::vector<size_t>& shape) -> size_t {
     auto count{1uz};
     for (const auto dim : shape) {
-        if (dim != 0 && count > std::numeric_limits<std::size_t>::max() / dim) {
+        if (dim != 0 && count > std::numeric_limits<size_t>::max() / dim) {
             throw std::runtime_error("Tensor shape element count overflow");
         }
         count *= dim;
@@ -87,7 +85,7 @@ auto ShapeElementCount(const std::vector<std::size_t>& shape) -> std::size_t {
 auto ValidateTensorByteSize(const TensorInfo& info) -> void {
     const auto element_count = ShapeElementCount(info.shape);
     const auto dtype_size = DTypeSize(info.dtype);
-    if (element_count > std::numeric_limits<std::size_t>::max() / dtype_size) {
+    if (element_count > std::numeric_limits<size_t>::max() / dtype_size) {
         throw std::runtime_error("Tensor byte size overflow for " + info.name);
     }
     const auto expected = element_count * dtype_size;
@@ -145,7 +143,6 @@ auto JsonBool(const std::string& json, const std::string& key) -> bool {
     throw std::runtime_error("Metadata value is not bool for: " + key);
 }
 
-// TODO
 auto ValidateConfig(const std::shared_ptr<Config> &config) -> void {
     if (config->dim <= 0 || config->hidden_dim <= 0 || config->head_dim <= 0 ||
         config->n_heads <= 0 || config->n_kv_heads <= 0 || config->max_seq_len <= 0) {
@@ -193,17 +190,17 @@ auto ReadTensorInfo(std::istream& in) -> TensorInfo {
     const auto ndim = ReadPod<std::uint32_t>(in);
     info.shape.reserve(ndim);
     for (auto i{0uz}; i < ndim; ++i) {
-        info.shape.push_back(CheckedSize(ReadPod<std::size_t>(in), "tensor dimension"));
+        info.shape.push_back(CheckedSize(ReadPod<size_t>(in), "tensor dimension"));
     }
 
-    info.byte_size = CheckedSize(ReadPod<std::size_t>(in), "tensor byte size");
+    info.byte_size = CheckedSize(ReadPod<size_t>(in), "tensor byte size");
 
     auto CheckedTell = [](std::istream& in) {
         const auto pos = in.tellg();
         if (pos < 0) {
             throw std::runtime_error("Failed to query input position");
         }
-        return static_cast<std::size_t>(pos);
+        return static_cast<size_t>(pos);
     };
     
     info.data_offset = CheckedSize(CheckedTell(in), "tensor data offset");
@@ -237,14 +234,14 @@ auto ValidateSupportedTensorType(const TensorInfo& info) -> void {
 auto ReadTensorBytes(
     const std::string& path,
     const TensorInfo& info,
-    std::size_t element_size
+    size_t element_size
 ) -> std::vector<std::uint8_t> {
     if (element_size == 0 || info.byte_size % element_size != 0) {
         throw std::runtime_error("Tensor byte size is not aligned: " + info.name);
     }
 
-    if (info.data_offset > static_cast<std::size_t>(std::numeric_limits<std::streamoff>::max()) ||
-        info.byte_size > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())) {
+    if (info.data_offset > static_cast<size_t>(std::numeric_limits<std::streamoff>::max()) ||
+        info.byte_size > static_cast<size_t>(std::numeric_limits<std::streamsize>::max())) {
         throw std::runtime_error("Tensor is too large to read: " + info.name);
     }
 
@@ -271,7 +268,7 @@ auto LoadTensorBytes(
     const std::string& path,
     const TensorInfo& info,
     TensorDType expected_dtype,
-    std::size_t element_size
+    size_t element_size
 ) -> std::vector<std::uint8_t> {
     if (info.dtype != expected_dtype) {
         throw std::runtime_error("Tensor dtype mismatch: " + info.name);
@@ -299,7 +296,7 @@ auto ReadFile(const std::filesystem::path& path) -> std::string {
     }
     in.seekg(0, std::ios::beg);
 
-    auto data = std::string(static_cast<std::size_t>(size), '\0');
+    auto data = std::string(static_cast<size_t>(size), '\0');
     in.read(data.data(), static_cast<std::streamsize>(data.size()));
     if (!in) {
         throw std::runtime_error("Failed to read tokenizer file: " + path.string());
@@ -353,7 +350,7 @@ auto Tokenizer::HasBackend() const -> bool {
     return backend_ != nullptr;
 }
 
-auto Tokenizer::VocabSize() const -> std::size_t {
+auto Tokenizer::VocabSize() const -> size_t {
     if (!offsets.empty()) {
         return offsets.size();
     }
@@ -379,11 +376,11 @@ auto Tokenizer::Token(std::int32_t id) const -> std::string {
         }
     }
 
-    if (id < 0 || static_cast<std::size_t>(id) >= offsets.size()) {
+    if (id < 0 || static_cast<size_t>(id) >= offsets.size()) {
         throw std::out_of_range("Token id is out of range");
     }
     const auto offset = offsets[id];
-    if (offset < 0 || static_cast<std::size_t>(offset) >= tokens.size()) {
+    if (offset < 0 || static_cast<size_t>(offset) >= tokens.size()) {
         throw std::runtime_error("Tokenizer offset is out of range");
     }
     return std::string(tokens.data() + offset);
@@ -511,8 +508,8 @@ auto Qwen3::InitializeInference(int context_length) -> void {
         output_ = LoadFloatData("model.output.weight");
     }
 
-    const auto dim = static_cast<std::size_t>(transformer_.config->dim);
-    const auto vocab_size = static_cast<std::size_t>(transformer_.config->vocab_size);
+    const auto dim = static_cast<size_t>(transformer_.config->dim);
+    const auto vocab_size = static_cast<size_t>(transformer_.config->vocab_size);
     if (embedding_.size() != vocab_size * dim || final_norm_.size() != dim ||
         (!transformer_.config->tie_word_embeddings && output_.size() != vocab_size * dim)) {
         throw std::runtime_error("Invalid embedding, final norm, or output tensor shape");
@@ -566,7 +563,7 @@ auto Qwen3::ForwardToken(std::int32_t token, int pos, State &state) -> const std
     }
 
     const auto* embedding_row =
-        embedding_.data() + static_cast<std::size_t>(token) * model_config.dim;
+        embedding_.data() + static_cast<size_t>(token) * model_config.dim;
     std::copy_n(embedding_row, model_config.dim, hidden_state_.begin());
 
     constexpr int kAttentionSinks = 4;
@@ -606,7 +603,7 @@ auto Qwen3::ForwardToken(std::int32_t token, int pos, State &state) -> const std
 auto Qwen3::Generate(
     std::string_view prompt,
     bool apply_chat_template,
-    std::size_t max_generated_tokens,
+    size_t max_generated_tokens,
     bool stop_on_eos,
     const std::function<void(std::span<const std::int32_t>)>& on_tokens
 ) -> GenerationResult {
@@ -706,13 +703,13 @@ auto Block::ResetCache() -> void {
 }
 
 auto Block::ValidateWeights() const -> void {
-    const auto dim = static_cast<std::size_t>(config->dim);
-    const auto hidden_dim = static_cast<std::size_t>(config->hidden_dim);
-    const auto head_dim = static_cast<std::size_t>(config->head_dim);
-    const auto q_dim = static_cast<std::size_t>(config->n_heads) * head_dim;
-    const auto kv_dim = static_cast<std::size_t>(config->n_kv_heads) * head_dim;
+    const auto dim = static_cast<size_t>(config->dim);
+    const auto hidden_dim = static_cast<size_t>(config->hidden_dim);
+    const auto head_dim = static_cast<size_t>(config->head_dim);
+    const auto q_dim = static_cast<size_t>(config->n_heads) * head_dim;
+    const auto kv_dim = static_cast<size_t>(config->n_kv_heads) * head_dim;
 
-    const auto require_size = [](const std::vector<std::bfloat16_t>& weight, std::size_t expected,
+    const auto require_size = [](const std::vector<std::bfloat16_t>& weight, size_t expected,
                                  const char* name) {
         if (weight.size() != expected) {
             throw std::invalid_argument(
@@ -802,9 +799,9 @@ auto Block::forward(
     #pragma omp parallel for private(head)
     for (head = 0; head < c.n_heads; ++head) {
         const auto kv_head = head / queries_per_kv_head;
-        Attn(
+        FastAttn(
             attn_output.data() + head * c.head_dim,
-            attn_scores.data() + static_cast<std::size_t>(head) * c.max_seq_len,
+            attn_scores.data() + static_cast<size_t>(head) * c.max_seq_len,
             q.data() + head * c.head_dim,
             cache.k_.data() + kv_head * c.head_dim,
             cache.v_.data() + kv_head * c.head_dim,
@@ -850,7 +847,7 @@ State::State(const std::shared_ptr<Config> &c) {
     v.resize(kv_dim);
     attn_output.resize(q_dim);
     projected.resize(c->dim);
-    attn_scores.resize(static_cast<std::size_t>(c->n_heads) * c->max_seq_len);
+    attn_scores.resize(static_cast<size_t>(c->n_heads) * c->max_seq_len);
 }
 
 // ----- Layers -----
@@ -908,6 +905,44 @@ auto Silu(float x) -> float {
     return x / (1.0f + expf(-x));
 }
 
+auto Reduce(__m256 value) -> float {
+    const __m128 low  = _mm256_extractf128_ps(value, 0);
+    const __m128 high = _mm256_extractf128_ps(value, 1);
+
+    __m128 sum = _mm_add_ps(low, high);
+    sum = _mm_hadd_ps(sum, sum);
+    sum = _mm_hadd_ps(sum, sum);
+
+    return _mm_cvtss_f32(sum);
+};
+
+auto LoadBF16(const std::bfloat16_t *p) -> __m256 {
+    const __m128i tmp = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+    __m256i wide = _mm256_cvtepu16_epi32(tmp);
+    wide = _mm256_slli_epi32(wide, 16);
+    return _mm256_castsi256_ps(wide);
+};
+
+auto FastDotProduct(const std::bfloat16_t *w_row, const float *x, int m) -> float {
+    __m256 sum_low = _mm256_setzero_ps();
+    __m256 sum_high = _mm256_setzero_ps();
+    int j = 0;
+    for (; j + 16 <= m; j += 16) {
+        __m256 wv_low = LoadBF16(w_row + j);
+        __m256 wv_high = LoadBF16(w_row + j + 8);
+        __m256 xv_low = _mm256_loadu_ps(x + j);
+        __m256 xv_high = _mm256_loadu_ps(x + j + 8);
+
+        sum_low = _mm256_fmadd_ps(wv_low, xv_low, sum_low);
+        sum_high = _mm256_fmadd_ps(wv_high, xv_high, sum_high);
+    }
+    float sum = Reduce(_mm256_add_ps(sum_low, sum_high));
+    for (; j < m; j++) {
+        sum += static_cast<float>(w_row[j]) * x[j];
+    }
+    return sum;
+};
+
 auto MatMul(
     float *out,
     const float* x, 
@@ -916,44 +951,11 @@ auto MatMul(
     int m
 ) -> void {
     // (n, m) x (m, ) = (n, )
-    auto Reduce = [](__m256 value) {
-        const __m128 low  = _mm256_extractf128_ps(value, 0);
-        const __m128 high = _mm256_extractf128_ps(value, 1);
-
-        __m128 sum = _mm_add_ps(low, high);
-        sum = _mm_hadd_ps(sum, sum);
-        sum = _mm_hadd_ps(sum, sum);
-
-        return _mm_cvtss_f32(sum);
-    };
-
-    auto LoadBF16 = [](const std::bfloat16_t *p) {
-        const __m128i tmp = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
-        __m256i wide = _mm256_cvtepu16_epi32(tmp);
-        wide = _mm256_slli_epi32(wide, 16);
-        return _mm256_castsi256_ps(wide);
-    };
-    
     int i;
     #pragma omp parallel for private(i)
     for (i = 0; i < n; i++) {
-        const std::bfloat16_t *w_row = w + static_cast<std::size_t>(i) * m;
-        
-        __m256 sum = _mm256_setzero_ps();
-        int j;
-        for (j = 0; j + 16 <= m; j += 16) {
-            __m256 wv_low = LoadBF16(w_row + j);
-            __m256 wv_high = LoadBF16(w_row + j + 8);
-            __m256 xv_low = _mm256_loadu_ps(x + j);
-            __m256 xv_high = _mm256_loadu_ps(x + j + 8);
-
-            sum = _mm256_fmadd_ps(wv_low, xv_low, sum);
-            sum = _mm256_fmadd_ps(wv_high, xv_high, sum);
-        }
-        out[i] = Reduce(sum);
-        for (; j < m; j++) {
-            out[i] += static_cast<float>(w_row[j]) * x[j];
-        }
+        const auto *w_row = w + static_cast<size_t>(i) * m;
+        out[i] = FastDotProduct(w_row, x, m);
     }
 }
 
@@ -1023,6 +1025,38 @@ auto Attn(
         for (auto j = 0; j < head_dim; j++) {
             score += q[j] * static_cast<float>(k[i * stride + j]);
         }
+        score /= sqrt_head_dim;
+        atth[i] = score;
+    }
+
+    Softmax(atth, atth, kv_len);
+
+    for (auto i = 0; i < head_dim; i++) {
+        auto res = 0.0f;
+        for (auto j = 0; j < kv_len; j++) {
+            res += atth[j] * static_cast<float>(v[j * stride + i]);
+        }
+        out[i] = res;
+    }
+}
+
+auto FastAttn(
+    float *out, // (dim, )
+    float *atth, // (kv_len, ) - to hold attn scores
+    const float *q, // (head_dim, )
+    const std::bfloat16_t *k, // (kv_len, n_kv_heads, head_dim)
+    const std::bfloat16_t *v, // (kv_len, n_kv_heads, head_dim)
+    int head_dim,
+    int n_kv_heads,
+    int kv_len
+) -> void {
+    const auto stride = n_kv_heads * head_dim;
+    const auto sqrt_head_dim = sqrtf(head_dim);
+    for (auto i = 0; i < kv_len; i++) {
+        const auto *k_row = k + static_cast<size_t>(i) * stride;  
+        
+
+        auto score = FastDotProduct(k_row, q, head_dim);
         score /= sqrt_head_dim;
         atth[i] = score;
     }
