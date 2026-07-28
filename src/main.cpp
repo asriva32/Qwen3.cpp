@@ -96,8 +96,7 @@ int main(int argc, char** argv) {
             omp_set_num_threads(num_threads);
         }
 
-        Qwen3 model;
-        model.Load(model_path);
+        Qwen3 model(model_path, context_length);
 
         const Config* config = model.GetConfig();
         std::cout << "Loaded " << model_path << '\n';
@@ -121,8 +120,7 @@ int main(int argc, char** argv) {
                       << info.byte_size << " bytes\n";
         }
 
-        std::cout << "Initializing inference with context=" << context_length << "\n";
-        model.InitializeInference(context_length);
+        std::cout << "Initialized inference with context=" << context_length << "\n";
         std::cout << "Prompt: " << prompt << "\n";
         if (!stop_on_eos) {
             std::cout << "Fixed-token benchmark: " << max_generated_tokens
@@ -144,12 +142,16 @@ int main(int argc, char** argv) {
                 std::cout.flush();
                 streamed_text.assign(decoded.data(), complete_size);
             };
+        const auto on_tokens =
+            stop_on_eos
+                ? std::function<void(std::span<const std::int32_t>)>{stream_tokens}
+                : std::function<void(std::span<const std::int32_t>)>{};
         const GenerationResult result = model.Generate(
             prompt,
             apply_chat_template,
             max_generated_tokens,
             stop_on_eos,
-            stream_tokens
+            on_tokens
         );
         if (result.text.starts_with(streamed_text)) {
             std::cout << std::string_view(result.text).substr(streamed_text.size());

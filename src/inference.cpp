@@ -40,7 +40,7 @@ auto ReadString(std::istream& in, std::uint64_t size) -> std::string {
     return value;
 }
 
-auto CheckedSize(size_t value, const std::string& field) -> size_t {
+auto CheckSize(size_t value, const std::string& field) -> size_t {
     if (value > std::numeric_limits<size_t>::max()) {
         throw std::runtime_error(field + " does not fit in size_t");
     }
@@ -190,10 +190,10 @@ auto ReadTensorInfo(std::istream& in) -> TensorInfo {
     const auto ndim = ReadPod<std::uint32_t>(in);
     info.shape.reserve(ndim);
     for (auto i{0uz}; i < ndim; ++i) {
-        info.shape.push_back(CheckedSize(ReadPod<size_t>(in), "tensor dimension"));
+        info.shape.push_back(CheckSize(ReadPod<size_t>(in), "tensor dimension"));
     }
 
-    info.byte_size = CheckedSize(ReadPod<size_t>(in), "tensor byte size");
+    info.byte_size = CheckSize(ReadPod<size_t>(in), "tensor byte size");
 
     auto CheckedTell = [](std::istream& in) {
         const auto pos = in.tellg();
@@ -203,16 +203,16 @@ auto ReadTensorInfo(std::istream& in) -> TensorInfo {
         return static_cast<size_t>(pos);
     };
     
-    info.data_offset = CheckedSize(CheckedTell(in), "tensor data offset");
+    info.data_offset = CheckSize(CheckedTell(in), "tensor data offset");
     ValidateTensorByteSize(info);
     return info;
 }
 
-auto IsTokenizerTensor(std::string_view name) -> bool {
-    return name == "tokenizer.json" || name == "tokenizer.tokens" || name == "tokenizer.offsets";
-}
-
 auto ValidateSupportedTensorType(const TensorInfo& info) -> void {
+    auto IsTokenizerTensor = [](std::string_view name) -> bool {
+        return name == "tokenizer.json" || name == "tokenizer.tokens" || name == "tokenizer.offsets";
+    };
+
     if (IsTokenizerTensor(info.name)) {
         if (info.name == "tokenizer.json" && info.dtype == TensorDType::UInt8) {
             return;
@@ -364,9 +364,9 @@ auto FindTokenizerJson(const std::string& model_path) -> std::filesystem::path {
 }
 
 // ----- Tokenizer -----
-
 Tokenizer::Tokenizer() = default;
 Tokenizer::~Tokenizer() = default;
+
 Tokenizer::Tokenizer(Tokenizer&&) noexcept = default;
 auto Tokenizer::operator=(Tokenizer&&) noexcept -> Tokenizer& = default;
 
@@ -442,7 +442,7 @@ auto Tokenizer::Decode(std::span<const std::int32_t> token_ids) const -> std::st
 
 // ----- Qwen3 -----
 
-auto Qwen3::Load(const std::string& path) -> void {
+Qwen3::Qwen3(const std::string& path, int context_length) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         throw std::runtime_error("Failed to open model file: " + path);
@@ -459,29 +459,28 @@ auto Qwen3::Load(const std::string& path) -> void {
         throw std::runtime_error("Unsupported Qwen3 model file version");
     }
 
-    const auto metadata_size = ReadPod<std::uint64_t>(in);
+    const auto metadata_size = ReadPod<size_t>(in);
     const auto metadata_json = ReadString(in, metadata_size);
-    transformer_.config = std::make_shared<Config>(ParseConfig(metadata_json));
-    if (transformer_.config->dtype != "bf16") {
+    inference_config_ = std::make_shared<Config>(ParseConfig(metadata_json));
+    if (inference_config_->dtype != "bf16") {
         throw std::runtime_error("Only bf16 Qwen3.bin files are supported");
     }
 
-    inference_initialized_ = false;
     tokenizer_ = Tokenizer{};
-    tokenizer_.SetSpecialTokenIds(*transformer_.config);
+    tokenizer_.SetSpecialTokenIds(*inference_config_);
     model_path_ = path;
 
-    const auto tensor_count = ReadPod<std::uint64_t>(in);
+    const auto tensor_count = ReadPod<size_t>(in);
     for (auto i{0uz}; i < tensor_count; ++i) {
         TensorInfo info = ReadTensorInfo(in);
         ValidateSupportedTensorType(info);
-        if (!transformer_.tensors.emplace(info.name, info).second) {
+        if (!tensors.emplace(info.name, info).second) {
             throw std::runtime_error("Duplicate tensor record: " + info.name);
         }
         SkipBytes(in, info.byte_size);
     }
 
-    if (HasTensor(transformer_.tensors, "tokenizer.tokens")) {
+    if (HasTensor(tensors, "tokenizer.tokens")) {
         auto token_bytes = LoadTensor<std::uint8_t>("tokenizer.tokens");
         tokenizer_.tokens.assign(
             reinterpret_cast<const char*>(token_bytes.ptr()),
@@ -489,12 +488,12 @@ auto Qwen3::Load(const std::string& path) -> void {
         );
     }
 
-    if (HasTensor(transformer_.tensors, "tokenizer.offsets")) {
+    if (HasTensor(tensors, "tokenizer.offsets")) {
         auto token_offsets = LoadTensor<std::int32_t>("tokenizer.offsets");
         tokenizer_.offsets = std::move(token_offsets.data);
     }
 
-    if (HasTensor(transformer_.tensors, "tokenizer.json")) {
+    if (HasTensor(tensors, "tokenizer.json")) {
         auto tokenizer_json = LoadTensor<std::uint8_t>("tokenizer.json");
         tokenizer_.LoadFromJsonBlob(std::string(
             reinterpret_cast<const char*>(tokenizer_json.ptr()),
@@ -505,83 +504,84 @@ auto Qwen3::Load(const std::string& path) -> void {
         if (!tokenizer_path.empty()) {
             tokenizer_.LoadFromJsonFile(tokenizer_path.string());
         }
+        // Should we throw ?
     }
+    InitializeInference(context_length);
 }
 
 auto Qwen3::GetConfig() const -> const Config* {
-    return transformer_.config.get();
+    return inference_config_.get();
 }
 
 auto Qwen3::GetTensorIndex() const -> const std::unordered_map<std::string, TensorInfo>& {
-    return transformer_.tensors;
+    return tensors;
 }
 
 auto Qwen3::GetTokenizer() const -> const Tokenizer& {
     return tokenizer_;
 }
 
-auto Qwen3::LoadFloatData(const std::string& name) const -> std::vector<std::bfloat16_t> {
-    return LoadTensor<std::bfloat16_t>(name).data;
+template<typename T>
+auto Qwen3::LoadFloatData(const std::string& name) const -> std::vector<T> {
+    return LoadTensor<T>(name).data;
 }
 
 auto Qwen3::InitializeInference(int context_length) -> void {
-    if (!transformer_.config) {
-        throw std::runtime_error("Load a model before initializing inference");
-    }
-    if (context_length <= 0 || context_length > transformer_.config->max_seq_len) {
+    if (context_length <= 0 || context_length > inference_config_->max_seq_len) {
         throw std::invalid_argument("Context length is outside the model's supported range");
     }
-    if (inference_initialized_ && inference_config_->max_seq_len == context_length) {
-        ResetInference();
-        return;
-    }
-    inference_initialized_ = false;
-
-    inference_config_ = std::make_shared<Config>(*transformer_.config);
+    // override context_length
     inference_config_->max_seq_len = context_length;
 
-    embedding_ = LoadFloatData("model.embed.weight");
-    final_norm_ = LoadFloatData("model.norm.weight");
-    if (transformer_.config->tie_word_embeddings) {
+    // If quantized further will have to figure this out
+    using dtype = std::bfloat16_t;
+
+    embedding_  = LoadFloatData<dtype>("model.embed.weight");
+    final_norm_ = LoadFloatData<dtype>("model.norm.weight");
+    if (inference_config_->tie_word_embeddings) {
         output_.clear();
     } else {
-        output_ = LoadFloatData("model.output.weight");
+        output_ = LoadFloatData<dtype>("model.output.weight");
     }
 
-    const auto dim = static_cast<size_t>(transformer_.config->dim);
-    const auto vocab_size = static_cast<size_t>(transformer_.config->vocab_size);
+    const auto dim = static_cast<size_t>(inference_config_->dim);
+    const auto vocab_size = static_cast<size_t>(inference_config_->vocab_size);
     if (embedding_.size() != vocab_size * dim || final_norm_.size() != dim ||
-        (!transformer_.config->tie_word_embeddings && output_.size() != vocab_size * dim)) {
+        (!inference_config_->tie_word_embeddings && output_.size() != vocab_size * dim)) {
         throw std::runtime_error("Invalid embedding, final norm, or output tensor shape");
     }
 
-    transformer_.blocks.reserve(transformer_.config->n_layers);
-    for (auto layer{0}; layer < transformer_.config->n_layers; ++layer) {
+    blocks.reserve(inference_config_->n_layers);
+    for (auto layer{0}; layer < inference_config_->n_layers; ++layer) {
         const std::string prefix = "model.layers." + std::to_string(layer);
         BlockWeights weights;
-        weights.attn_norm = LoadFloatData(prefix + ".attn.norm.weight");
-        weights.q_norm = LoadFloatData(prefix + ".attn.q_norm.weight");
-        weights.k_norm = LoadFloatData(prefix + ".attn.k_norm.weight");
-        weights.wq = LoadFloatData(prefix + ".attn.wq.weight");
-        weights.wk = LoadFloatData(prefix + ".attn.wk.weight");
-        weights.wv = LoadFloatData(prefix + ".attn.wv.weight");
-        weights.wo = LoadFloatData(prefix + ".attn.wo.weight");
-        weights.mlp_norm = LoadFloatData(prefix + ".mlp.norm.weight");
-        weights.w1 = LoadFloatData(prefix + ".mlp.w1.weight");
-        weights.w2 = LoadFloatData(prefix + ".mlp.w2.weight");
-        weights.w3 = LoadFloatData(prefix + ".mlp.w3.weight");
-        transformer_.blocks.emplace_back(inference_config_, std::move(weights));
+        weights.attn_norm = LoadFloatData<dtype>(prefix + ".attn.norm.weight");
+        weights.q_norm    = LoadFloatData<dtype>(prefix + ".attn.q_norm.weight");
+        weights.k_norm    = LoadFloatData<dtype>(prefix + ".attn.k_norm.weight");
+        weights.wq        = LoadFloatData<dtype>(prefix + ".attn.wq.weight");
+        weights.wk        = LoadFloatData<dtype>(prefix + ".attn.wk.weight");
+        weights.wv        = LoadFloatData<dtype>(prefix + ".attn.wv.weight");
+        weights.wo        = LoadFloatData<dtype>(prefix + ".attn.wo.weight");
+        weights.mlp_norm  = LoadFloatData<dtype>(prefix + ".mlp.norm.weight");
+        weights.w1        = LoadFloatData<dtype>(prefix + ".mlp.w1.weight");
+        weights.w2        = LoadFloatData<dtype>(prefix + ".mlp.w2.weight");
+        weights.w3        = LoadFloatData<dtype>(prefix + ".mlp.w3.weight");
+        blocks.emplace_back(inference_config_, std::move(weights));
     }
 
-    hidden_state_.resize(transformer_.config->dim);
-    normalized_state_.resize(transformer_.config->dim);
-    logits_.resize(transformer_.config->vocab_size);
-    inference_initialized_ = true;
+    for (const auto &block: blocks) {
+        block.ValidateWeights();
+    }
+
+    hidden_state_.resize(inference_config_->dim);
+    normalized_state_.resize(inference_config_->dim);
+    logits_.resize(inference_config_->vocab_size);
+    // kind of unnecessary
     ResetInference();
 }
 
 auto Qwen3::ResetInference() -> void {
-    for (Block& block : transformer_.blocks) {
+    for (Block& block : blocks) {
         block.ResetCache();
     }
     std::fill(hidden_state_.begin(), hidden_state_.end(), 0.0f);
@@ -590,12 +590,8 @@ auto Qwen3::ResetInference() -> void {
 }
 
 auto Qwen3::ForwardToken(std::int32_t token, int pos, State &state) -> const std::vector<float>& {
-    if (!inference_initialized_) {
-        throw std::runtime_error("Initialize inference before forwarding tokens");
-    }
-    const auto& model_config = *transformer_.config;
-    const auto& runtime_config = *inference_config_;
-    if (token < 0 || token >= model_config.vocab_size) {
+    const auto& config = *inference_config_;
+    if (token < 0 || token >= config.vocab_size) {
         throw std::out_of_range("Token id is outside the vocabulary");
     }
     if (pos < 0) {
@@ -603,11 +599,11 @@ auto Qwen3::ForwardToken(std::int32_t token, int pos, State &state) -> const std
     }
 
     const auto* embedding_row =
-        embedding_.data() + static_cast<size_t>(token) * model_config.dim;
-    std::copy_n(embedding_row, model_config.dim, hidden_state_.begin());
+        embedding_.data() + static_cast<size_t>(token) * config.dim;
+    std::copy_n(embedding_row, config.dim, hidden_state_.begin());
 
     constexpr int kAttentionSinks = 4;
-    const auto context_length = runtime_config.max_seq_len;
+    const auto context_length = config.max_seq_len;
     const auto num_sink = pos >= context_length
         ? std::min(kAttentionSinks, context_length - 1)
         : 0;
@@ -616,7 +612,7 @@ auto Qwen3::ForwardToken(std::int32_t token, int pos, State &state) -> const std
         : num_sink + (pos - num_sink) % (context_length - num_sink);
     const auto kv_len = std::min(pos + 1, context_length);
 
-    for (Block& block : transformer_.blocks) {
+    for (Block& block : blocks) {
         block.forward(hidden_state_.data(), pos, num_sink, kv_pos, kv_len, state);
     }
 
@@ -624,18 +620,18 @@ auto Qwen3::ForwardToken(std::int32_t token, int pos, State &state) -> const std
         hidden_state_.data(),
         final_norm_.data(),
         normalized_state_.data(),
-        model_config.norm_eps,
-        model_config.dim
+        config.norm_eps,
+        config.dim
     );
-    const auto classifier = model_config.tie_word_embeddings
+    const auto classifier = config.tie_word_embeddings
         ? embedding_.data()
         : output_.data();
     MatMul(
         logits_.data(),
         normalized_state_.data(),
         classifier,
-        model_config.vocab_size,
-        model_config.dim
+        config.vocab_size,
+        config.dim
     );
     return logits_;
 }
@@ -647,12 +643,6 @@ auto Qwen3::Generate(
     bool stop_on_eos,
     const std::function<void(std::span<const std::int32_t>)>& on_tokens
 ) -> GenerationResult {
-    if (!inference_initialized_) {
-        InitializeInference();
-    } else {
-        ResetInference();
-    }
-
     auto model_input = std::string{};
     if (apply_chat_template) {
         model_input = "<|im_start|>user\n";
@@ -664,7 +654,7 @@ auto Qwen3::Generate(
 
     auto prompt_tokens = tokenizer_.Encode(model_input);
     if (prompt_tokens.empty()) {
-        prompt_tokens.push_back(transformer_.config->bos_token_id);
+        prompt_tokens.push_back(inference_config_->bos_token_id);
     }
 
     GenerationResult result;
@@ -674,17 +664,21 @@ auto Qwen3::Generate(
     const std::vector<float>* logits = nullptr;
     const auto prefill_start = std::chrono::steady_clock::now();
     State state(inference_config_);
+    // TODO: implement batched prefill
+    // [tokens, dim]
     for (const auto token : prompt_tokens) {
         logits = &ForwardToken(token, pos++, state);
     }
+    // generated first token
     const auto prefill_end = std::chrono::steady_clock::now();
     result.stats.prefill_seconds =
         std::chrono::duration<double>(prefill_end - prefill_start).count();
 
     const auto decode_start = std::chrono::steady_clock::now();
+    // Autoregressive loop
     while (result.tokens.size() < max_generated_tokens) {
         const auto token = Sampler::Greedy(*logits);
-        if (stop_on_eos && token == transformer_.config->eos_token_id) {
+        if (stop_on_eos && token == inference_config_->eos_token_id) {
             result.stats.stopped_on_eos = true;
             break;
         }
@@ -705,6 +699,7 @@ auto Qwen3::Generate(
     return result;
 }
 
+// TODO: maybe add temperature based sampling
 auto Sampler::Greedy(std::span<const float> logits) -> std::int32_t {
     if (logits.empty()) {
         throw std::invalid_argument("Cannot sample empty logits");
@@ -723,9 +718,6 @@ auto GenerationStats::DecodeTokensPerSecond() const -> double {
 
 // ----- Block -----
 Block::Block(const std::shared_ptr<Config>& config) : config(config) {
-    if (!config) {
-        throw std::invalid_argument("Block config must not be null");
-    }
     
     const auto q_dim = config->n_heads * config->head_dim;
     const auto kv_dim = config->n_kv_heads * config->head_dim;

@@ -28,8 +28,7 @@ int main(int argc, char** argv) {
     const std::string model_path = argc > 1 ? argv[1] : "Qwen3.bin";
 
     try {
-        Qwen3 model;
-        model.Load(model_path);
+        Qwen3 model(model_path);
 
         Check(model.GetConfig() != nullptr, "missing model config");
         const Config& config = *model.GetConfig();

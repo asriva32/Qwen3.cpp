@@ -2,12 +2,6 @@
 """
 Convert a Hugging Face Qwen3 checkpoint into a simple binary file for this repo.
 
-The converter is intentionally similar in spirit to yalm's convert.py:
-  - read config.json and tokenizer.json from a Hugging Face model directory
-  - normalize model metadata into one compact header
-  - normalize Hugging Face tensor names into runtime-oriented names
-  - append tokenizer.json and compatibility tokenizer bytes
-
 File format, little endian:
   char[8]   magic: b"QWEN3CP\\0"
   uint32    format version, currently 1

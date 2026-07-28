@@ -169,6 +169,8 @@ struct BlockWeights {
 };
 
 class Block {
+friend class Qwen3;
+
 public:
     void forward(float* x, int pos, int num_sink, int kv_pos, int kv_len, State &state);
 
@@ -190,13 +192,6 @@ private:
     std::shared_ptr<Config> config;
     BlockWeights weights;
     KVCache cache;
-};
-
-class Transformer {
-public:
-    std::unordered_map<std::string, TensorInfo> tensors;
-    std::vector<Block> blocks;
-    std::shared_ptr<Config> config;
 };
 
 class Sampler {
@@ -224,7 +219,7 @@ struct GenerationResult {
 
 class Qwen3 {
 public:
-    void Load(const std::string& path);
+    Qwen3(const std::string &path, int context_length = 512);
     void InitializeInference(int context_length = 512);
     void ResetInference();
 
@@ -245,19 +240,20 @@ public:
     const Tokenizer& GetTokenizer() const;
 
 private:
-    std::vector<std::bfloat16_t> LoadFloatData(const std::string& name) const;
+    template<typename T>
+    std::vector<T> LoadFloatData(const std::string& name) const;
 
     std::string model_path_;
-    Transformer transformer_;
+    std::vector<Block> blocks;
+    std::unordered_map<std::string, TensorInfo> tensors;
     Tokenizer tokenizer_;
     std::shared_ptr<Config> inference_config_;
-    std::vector<std::bfloat16_t> embedding_;
+    std::vector<std::bfloat16_t> embedding_; // embedding table
     std::vector<std::bfloat16_t> final_norm_;
     std::vector<std::bfloat16_t> output_;
     std::vector<float> hidden_state_;
     std::vector<float> normalized_state_;
     std::vector<float> logits_;
-    bool inference_initialized_ = false;
 };
 
 
@@ -284,8 +280,8 @@ std::vector<std::uint8_t> LoadTensorBytes(
 
 template <SupportedTensorElement T>
 Tensor<T> Qwen3::LoadTensor(const std::string& name) const {
-    const auto it = transformer_.tensors.find(name);
-    if (it == transformer_.tensors.end()) {
+    const auto it = tensors.find(name);
+    if (it == tensors.end()) {
         throw std::runtime_error("Tensor not found: " + name);
     }
 
