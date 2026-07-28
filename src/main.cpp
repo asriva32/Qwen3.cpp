@@ -7,10 +7,11 @@
 #include <string>
 #include <string_view>
 #include <omp.h>
+#include <thread>
 
 namespace {
 
-std::string DTypeName(TensorDType dtype) {
+auto DTypeName(TensorDType dtype) -> std::string {
     switch (dtype) {
         case TensorDType::Float32:
             return "f32";
@@ -24,7 +25,7 @@ std::string DTypeName(TensorDType dtype) {
     throw std::runtime_error("Unknown tensor dtype");
 }
 
-std::size_t ParseTokenCount(std::string_view value, std::string_view option) {
+auto ParseIntegralOption(std::string_view value, std::string_view option) -> size_t {
     std::size_t count = 0;
     const auto [end, error] =
         std::from_chars(value.data(), value.data() + value.size(), count);
@@ -35,7 +36,7 @@ std::size_t ParseTokenCount(std::string_view value, std::string_view option) {
     return count;
 }
 
-std::size_t CompleteDecodedSize(std::string_view text) {
+auto CompleteDecodedSize(std::string_view text) -> size_t {
     constexpr auto replacement = std::string_view{"\xef\xbf\xbd"};
     auto size = text.size();
     while (size >= replacement.size() &&
@@ -47,16 +48,18 @@ std::size_t CompleteDecodedSize(std::string_view text) {
 
 }  // namespace
 
+const int MAX_THREADS = std::thread::hardware_concurrency();
+
 int main(int argc, char** argv) {
-    omp_set_num_threads(8);
     try {
         const std::string model_path = argc > 1 ? argv[1] : "Qwen3.bin";
         const std::string prompt = argc > 2 ? argv[2] : "Hello";
         const int context_length = argc > 3 ? std::stoi(argv[3]) : 512;
         auto apply_chat_template = true;
-        auto max_generated_tokens = std::size_t{512};
+        auto max_generated_tokens = size_t{512};
         auto stop_on_eos = true;
         auto token_limit_was_set = false;
+        auto num_threads = size_t{0};
 
         for (auto i = 4; i < argc; ++i) {
             const auto option = std::string_view(argv[i]);
@@ -71,12 +74,26 @@ int main(int argc, char** argv) {
                     throw std::invalid_argument(
                         std::string(option) + " requires a token count");
                 }
-                max_generated_tokens = ParseTokenCount(argv[i], option);
+                max_generated_tokens = ParseIntegralOption(argv[i], option);
                 stop_on_eos = option != "--benchmark";
                 token_limit_was_set = true;
+            } else if (option == "--threads") {
+                if (++i >= argc) {
+                    throw std::invalid_argument(
+                        std::string(option) + " requires a thread count");
+                }
+                num_threads = ParseIntegralOption(argv[i], option);
+                if (num_threads > MAX_THREADS) {
+                    throw std::invalid_argument(
+                        std::string(option) + " should have count <= " + std::to_string(MAX_THREADS));
+                }
             } else {
                 throw std::invalid_argument("Unknown option: " + std::string(option));
             }
+        }
+
+        if (num_threads > 0) {
+            omp_set_num_threads(num_threads);
         }
 
         Qwen3 model;
