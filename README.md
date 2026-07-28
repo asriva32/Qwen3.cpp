@@ -4,8 +4,10 @@ Currently has a dependency on https://github.com/mlc-ai/tokenizers-cpp (probably
 Will try to remove this dependency in the future
 
 ## Requirements
-Need gcc version that supports C++ 23
-Need rust installed
+
+- Use Linux/WSL2
+- Need gcc version that supports C++ 23
+- Need rust installed
 
 ## Build
 
