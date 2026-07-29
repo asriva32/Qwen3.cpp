@@ -73,3 +73,4 @@ Testing/
 .agents
 __pycache__
 Qwen3.bin
+.bench/
