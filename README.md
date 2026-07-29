@@ -47,3 +47,17 @@ Add `--raw` to either command to skip Qwen's chat template. The CLI reports
 prefill and decode throughput plus the reason generation stopped.
 
 To specify number of threads to use, `--threads N` uses N threads. It is recommended to play around with this number for maximum performance.
+
+## Comparision with llama.cpp
+CPU: AMD Ryzen AI 9 HX 370
+RAM: 32GB DDR5 at 7500 MT/s
+Tested both using bfloat16 on 8 threads with 5 repetitions:
+
+- llama.cpp
+    - Prefill: 44.82 tok/s
+    - Decode: 301.61 tok/s
+- Qwen3.cpp
+    - Prefill: 40.53 tok/s
+    - Decode: 39.91 tok/s
+
+Prefill speed significantly worse because it isn't batched but decode achieves similar or better performance when tuned for my system.

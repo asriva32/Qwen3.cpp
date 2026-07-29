@@ -1034,13 +1034,26 @@ auto FastAttn(
     }
 
     Softmax(atth, atth, kv_len);
-
     for (auto i = 0; i < head_dim; i++) {
-        auto res = 0.0f;
-        for (auto j = 0; j < kv_len; j++) {
-            res += atth[j] * static_cast<float>(v[j * stride + i]);
+        out[i] = 0.0f;
+    }
+    // Vectorize this
+    for (auto token = 0; token < kv_len; ++token) {
+        const float score = atth[token];
+        const auto* value = v + token * stride;
+        __m256 score_vec = _mm256_set1_ps(score);
+
+        auto i = 0;
+        for (; i + 8 <= head_dim; i += 8) {
+            __m256 value_vec = LoadBF16(value + i);
+            __m256 out_vec = _mm256_loadu_ps(out + i);
+            out_vec = _mm256_add_ps(_mm256_mul_ps(value_vec, score_vec), out_vec);
+            _mm256_storeu_ps(out + i, out_vec);
         }
-        out[i] = res;
+
+        for (; i < head_dim; ++i) {
+            out[i] += score * static_cast<float>(value[i]);
+        }
     }
 }
 
