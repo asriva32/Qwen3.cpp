@@ -298,8 +298,8 @@ Tensor<T> Qwen3::LoadTensor(const std::string& name) const {
     return Tensor<T>{info, std::move(data)};
 }
 
-void  RmsNorm(const float *x, const std::bfloat16_t *weights, float *out, float eps, int n);
-void  Softmax(const float *x, float *out, int n);
+void  RmsNorm(float *out, const float *x, const std::bfloat16_t *weights, float eps, int n);
+void  Softmax(float *out, const float *x, int n);
 float Silu(float x);
 void  MatMul(float *out, const float *x, const std::bfloat16_t *y, int n, int m);
 void  ApplyRotaryEmb(float *out, int d, int head_dim, int pos, float theta, int rotary_dim);

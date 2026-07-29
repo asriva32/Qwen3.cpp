@@ -617,9 +617,9 @@ auto Qwen3::ForwardToken(std::int32_t token, int pos, State &state) -> const std
     }
 
     RmsNorm(
+        normalized_state_.data(),
         hidden_state_.data(),
         final_norm_.data(),
-        normalized_state_.data(),
         config.norm_eps,
         config.dim
     );
@@ -792,18 +792,18 @@ auto Block::forward(
     const auto q_dim = c.n_heads * c.head_dim;
     const auto kv_dim = c.n_kv_heads * c.head_dim;
 
-    RmsNorm(x, weights.attn_norm.data(), norm_buffer.data(), c.norm_eps, c.dim);
+    RmsNorm(norm_buffer.data(), x, weights.attn_norm.data() , c.norm_eps, c.dim);
     MatMul(q.data(), norm_buffer.data(), weights.wq.data(), q_dim, c.dim);
     MatMul(k.data(), norm_buffer.data(), weights.wk.data(), kv_dim, c.dim);
     MatMul(v.data(), norm_buffer.data(), weights.wv.data(), kv_dim, c.dim);
 
     for (auto head = 0; head < c.n_heads; ++head) {
         auto* q_head = q.data() + head * c.head_dim;
-        RmsNorm(q_head, weights.q_norm.data(), q_head, c.norm_eps, c.head_dim);
+        RmsNorm(q_head, q_head, weights.q_norm.data(), c.norm_eps, c.head_dim);
     }
     for (auto head = 0; head < c.n_kv_heads; ++head) {
         auto* k_head = k.data() + head * c.head_dim;
-        RmsNorm(k_head, weights.k_norm.data(), k_head, c.norm_eps, c.head_dim);
+        RmsNorm(k_head, k_head, weights.k_norm.data(), c.norm_eps, c.head_dim);
     }
 
     ApplyRotaryEmb(q.data(), q_dim, c.head_dim, pos, c.rope_theta, c.rotary_dim);
@@ -848,7 +848,7 @@ auto Block::forward(
         x[i] += projected[i];
     }
 
-    RmsNorm(x, weights.mlp_norm.data(), norm_buffer.data(), c.norm_eps, c.dim);
+    RmsNorm(norm_buffer.data(), x, weights.mlp_norm.data(), c.norm_eps, c.dim);
     FeedForwardNetwork(
         projected.data(),
         state.lin1.data(),
@@ -885,9 +885,9 @@ State::State(const std::shared_ptr<Config> &c) {
 // ----- Layers -----
 
 auto RmsNorm(
+    float *out,
     const float *x, 
     const std::bfloat16_t *w, 
-    float *out,
     float eps,
     int n
 ) -> void {
@@ -923,9 +923,9 @@ auto RmsNorm(
 }
 
 auto Softmax(
+    float *out,
     const float *x, 
-    float *out, 
-    int    n
+    int n
 ) -> void {
 
     auto mx_score = std::numeric_limits<float>::lowest();
