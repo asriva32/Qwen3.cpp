@@ -50,7 +50,9 @@ To specify number of threads to use, `--threads N` uses N threads. It is recomme
 
 ## Comparision with llama.cpp
 CPU: AMD Ryzen AI 9 HX 370
+
 RAM: 32GB DDR5 at 7500 MT/s
+
 Tested both using bfloat16 on 8 threads with 5 repetitions:
 
 - llama.cpp
