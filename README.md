@@ -56,10 +56,10 @@ RAM: 32GB DDR5 at 7500 MT/s
 Tested both using bfloat16 on 8 threads with 5 repetitions:
 
 - llama.cpp
-    - Prefill: 44.82 tok/s
-    - Decode: 301.61 tok/s
+    - Prefill: 303.27 tok/s
+    - Decode: 39.42 tok/s
 - Qwen3.cpp
-    - Prefill: 40.53 tok/s
-    - Decode: 39.91 tok/s
+    - Prefill: 43.20 tok/s
+    - Decode: 40.62 tok/s
 
 Prefill speed significantly worse because it isn't batched but decode achieves similar or better performance when tuned for my system.
