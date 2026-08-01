@@ -36,6 +36,13 @@ struct TensorInfo {
 };
 
 template <typename T>
+concept SupportedJsonValue =
+    std::same_as<T, float>        ||
+    std::same_as<T, std::int32_t> ||
+    std::same_as<T, bool>        ||
+    std::same_as<T, std::string>;
+
+template <typename T>
 concept SupportedTensorElement =
     std::same_as<T, float> ||
     std::same_as<T, std::int32_t> ||

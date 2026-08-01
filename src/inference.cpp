@@ -122,62 +122,62 @@ auto JsonValue(const std::string& json, const std::string& key) -> std::string {
     }
     return json.substr(pos, end - pos);
 }
-
-auto JsonI32(const std::string& json, const std::string& key) -> std::int32_t {
-    const auto value = std::stoi(JsonValue(json, key));
-    return value;
-}
-
-auto JsonFloat(const std::string& json, const std::string& key) -> float {
-    return std::stof(JsonValue(json, key));
-}
-
-auto JsonBool(const std::string& json, const std::string& key) -> bool {
+template<SupportedJsonValue T>
+auto GetJsonValue(const std::string &json, const std::string& key) -> T {
     const auto value = JsonValue(json, key);
-    if (value == "true") {
-        return true;
+    if constexpr (std::same_as<T, float>) {
+        return std::stof(JsonValue(json, key));
+    } else if constexpr (std::same_as<T, bool>) {
+        if (value == "true") {
+            return true;
+        } 
+        if (value == "false") {
+            return false;
+        }
+        throw std::runtime_error("Metadata value is not bool for: " + key);
+    } else if constexpr (std::same_as<T, std::int32_t>) {
+        return std::stoi(JsonValue(json, key));
+    } else if constexpr (std::same_as<T, std::string>) {
+        return value;
     }
-    if (value == "false") {
-        return false;
-    }
-    throw std::runtime_error("Metadata value is not bool for: " + key);
 }
 
-auto ValidateConfig(const std::shared_ptr<Config> &config) -> void {
-    if (config->dim <= 0 || config->hidden_dim <= 0 || config->head_dim <= 0 ||
-        config->n_heads <= 0 || config->n_kv_heads <= 0 || config->max_seq_len <= 0) {
+auto ValidateConfig(const Config &config) -> void {
+    if (config.dim <= 0 || config.hidden_dim <= 0 || config.head_dim <= 0 ||
+        config.n_heads <= 0 || config.n_kv_heads <= 0 || config.max_seq_len <= 0) {
         throw std::invalid_argument("Block config dimensions must be positive");
     }
-    if (config->n_heads % config->n_kv_heads != 0) {
+    if (config.n_heads % config.n_kv_heads != 0) {
         throw std::invalid_argument("Attention head count must be divisible by KV head count");
     }
-    if (config->rotary_dim < 0 || config->rotary_dim > config->head_dim ||
-        config->rotary_dim % 2 != 0) {
+    if (config.rotary_dim < 0 || config.rotary_dim > config.head_dim ||
+        config.rotary_dim % 2 != 0) {
         throw std::invalid_argument("rotary_dim must be even and no larger than head_dim");
     }
 }
 
 auto ParseConfig(const std::string& json) -> Config {
     Config config;
-    config.arch = JsonValue(json, "arch");
-    config.dtype = JsonValue(json, "dtype");
-    config.act_type = JsonValue(json, "act_type");
-    config.dim = JsonI32(json, "dim");
-    config.hidden_dim = JsonI32(json, "hidden_dim");
-    config.head_dim = JsonI32(json, "head_dim");
-    config.n_layers = JsonI32(json, "n_layers");
-    config.n_heads = JsonI32(json, "n_heads");
-    config.n_kv_heads = JsonI32(json, "n_kv_heads");
-    config.vocab_size = JsonI32(json, "vocab_size");
-    config.max_seq_len = JsonI32(json, "max_seq_len");
-    config.bos_token_id = JsonI32(json, "bos_token_id");
-    config.eos_token_id = JsonI32(json, "eos_token_id");
-    config.rotary_dim = JsonI32(json, "rotary_dim");
-    config.rope_theta = JsonFloat(json, "rope_theta");
-    config.norm_eps = JsonFloat(json, "norm_eps");
-    config.tie_word_embeddings = JsonBool(json, "tie_word_embeddings");
-    config.attention_bias = JsonBool(json, "attention_bias");
-    config.qk_norm = JsonBool(json, "qk_norm");
+    config.arch                = GetJsonValue<std::string>(json, "arch");
+    config.dtype               = GetJsonValue<std::string>(json, "dtype");
+    config.act_type            = GetJsonValue<std::string>(json, "act_type");
+    config.dim                 = GetJsonValue<std::int32_t>(json, "dim");
+    config.hidden_dim          = GetJsonValue<std::int32_t>(json, "hidden_dim");
+    config.head_dim            = GetJsonValue<std::int32_t>(json, "head_dim");
+    config.n_layers            = GetJsonValue<std::int32_t>(json, "n_layers");
+    config.n_heads             = GetJsonValue<std::int32_t>(json, "n_heads");
+    config.n_kv_heads          = GetJsonValue<std::int32_t>(json, "n_kv_heads");
+    config.vocab_size          = GetJsonValue<std::int32_t>(json, "vocab_size");
+    config.max_seq_len         = GetJsonValue<std::int32_t>(json, "max_seq_len");
+    config.bos_token_id        = GetJsonValue<std::int32_t>(json, "bos_token_id");
+    config.eos_token_id        = GetJsonValue<std::int32_t>(json, "eos_token_id");
+    config.rotary_dim          = GetJsonValue<std::int32_t>(json, "rotary_dim");
+    config.rope_theta          = GetJsonValue<float>(json, "rope_theta");
+    config.norm_eps            = GetJsonValue<float>(json, "norm_eps");
+    config.tie_word_embeddings = GetJsonValue<bool>(json, "tie_word_embeddings");
+    config.attention_bias      = GetJsonValue<bool>(json, "attention_bias");
+    config.qk_norm             = GetJsonValue<bool>(json, "qk_norm");
+    ValidateConfig(config);
     return config;
 }
 
