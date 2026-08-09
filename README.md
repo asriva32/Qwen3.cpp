@@ -8,6 +8,7 @@ Will try to remove this dependency in the future
 - Use Linux/WSL2
 - Need gcc version that supports C++ 23
 - Need rust installed
+- Get qwen3 0.6b from hugging face
 
 ## Build
 
@@ -20,6 +21,11 @@ Run the loader test with:
 
 ```sh
 ctest --test-dir build/cmake --output-on-failure
+```
+
+First convert the model with: 
+```sh
+python convert.py Qwen3.bin /path/to/Qwen3-0.6B --dtype bf16
 ```
 
 Run the CLI with:
