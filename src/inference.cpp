@@ -68,7 +68,7 @@ auto DTypeSize(TensorDType dtype) -> size_t {
         case TensorDType::Int32:
             return 4;
     }
-    throw std::runtime_error("Unknown tensor dtype");
+    std::unreachable();
 }
 
 auto ShapeElementCount(const std::vector<size_t>& shape) -> size_t {
@@ -504,7 +504,6 @@ Qwen3::Qwen3(const std::string& path, int context_length) {
         if (!tokenizer_path.empty()) {
             tokenizer_.LoadFromJsonFile(tokenizer_path.string());
         }
-        // Should we throw ?
     }
     InitializeInference(context_length);
 }
@@ -534,14 +533,14 @@ auto Qwen3::InitializeInference(int context_length) -> void {
     inference_config_->max_seq_len = context_length;
 
     // If quantized further will have to figure this out
-    using dtype = std::bfloat16_t;
+    using bf16 = std::bfloat16_t;
 
-    embedding_  = LoadFloatData<dtype>("model.embed.weight");
-    final_norm_ = LoadFloatData<dtype>("model.norm.weight");
+    embedding_  = LoadFloatData<bf16>("model.embed.weight");
+    final_norm_ = LoadFloatData<bf16>("model.norm.weight");
     if (inference_config_->tie_word_embeddings) {
         output_.clear();
     } else {
-        output_ = LoadFloatData<dtype>("model.output.weight");
+        output_ = LoadFloatData<bf16>("model.output.weight");
     }
 
     const auto dim = static_cast<size_t>(inference_config_->dim);
@@ -555,17 +554,17 @@ auto Qwen3::InitializeInference(int context_length) -> void {
     for (auto layer{0}; layer < inference_config_->n_layers; ++layer) {
         const std::string prefix = "model.layers." + std::to_string(layer);
         BlockWeights weights;
-        weights.attn_norm = LoadFloatData<dtype>(prefix + ".attn.norm.weight");
-        weights.q_norm    = LoadFloatData<dtype>(prefix + ".attn.q_norm.weight");
-        weights.k_norm    = LoadFloatData<dtype>(prefix + ".attn.k_norm.weight");
-        weights.wq        = LoadFloatData<dtype>(prefix + ".attn.wq.weight");
-        weights.wk        = LoadFloatData<dtype>(prefix + ".attn.wk.weight");
-        weights.wv        = LoadFloatData<dtype>(prefix + ".attn.wv.weight");
-        weights.wo        = LoadFloatData<dtype>(prefix + ".attn.wo.weight");
-        weights.mlp_norm  = LoadFloatData<dtype>(prefix + ".mlp.norm.weight");
-        weights.w1        = LoadFloatData<dtype>(prefix + ".mlp.w1.weight");
-        weights.w2        = LoadFloatData<dtype>(prefix + ".mlp.w2.weight");
-        weights.w3        = LoadFloatData<dtype>(prefix + ".mlp.w3.weight");
+        weights.attn_norm = LoadFloatData<bf16>(prefix + ".attn.norm.weight");
+        weights.q_norm    = LoadFloatData<bf16>(prefix + ".attn.q_norm.weight");
+        weights.k_norm    = LoadFloatData<bf16>(prefix + ".attn.k_norm.weight");
+        weights.wq        = LoadFloatData<bf16>(prefix + ".attn.wq.weight");
+        weights.wk        = LoadFloatData<bf16>(prefix + ".attn.wk.weight");
+        weights.wv        = LoadFloatData<bf16>(prefix + ".attn.wv.weight");
+        weights.wo        = LoadFloatData<bf16>(prefix + ".attn.wo.weight");
+        weights.mlp_norm  = LoadFloatData<bf16>(prefix + ".mlp.norm.weight");
+        weights.w1        = LoadFloatData<bf16>(prefix + ".mlp.w1.weight");
+        weights.w2        = LoadFloatData<bf16>(prefix + ".mlp.w2.weight");
+        weights.w3        = LoadFloatData<bf16>(prefix + ".mlp.w3.weight");
         blocks.emplace_back(inference_config_, std::move(weights));
     }
 
@@ -576,8 +575,6 @@ auto Qwen3::InitializeInference(int context_length) -> void {
     hidden_state_.resize(inference_config_->dim);
     normalized_state_.resize(inference_config_->dim);
     logits_.resize(inference_config_->vocab_size);
-    // kind of unnecessary
-    ResetInference();
 }
 
 auto Qwen3::ResetInference() -> void {
