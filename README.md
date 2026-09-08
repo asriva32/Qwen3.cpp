@@ -1,11 +1,7 @@
 # Qwen3.cpp
 
-Qwen3.cpp is an experimental C++23 CPU inference engine for Qwen3. It builds a
+Qwen3.cpp is a C++23 CPU inference engine for Qwen3. It builds a
 standalone native executable without a scripting runtime or language bindings.
-
-> [!IMPORTANT]
-> This project is alpha software. It currently supports Linux on x86-64 CPUs
-> with AVX2 and FMA, and Qwen3 models converted to the project's BF16 format.
 
 ## Requirements
 
@@ -59,13 +55,18 @@ Run `./build/cmake/qwen3 --help` for all options.
 
 ## Benchmarks
 
-On an AMD Ryzen AI 9 HX 370 with 32 GB DDR5-7500, using Qwen3 0.6B BF16 and
-eight threads:
+On an AMD Ryzen AI 9 HX 370 with 32 GB DDR5-7500, using BF16 weights and eight
+threads:
 
-| Engine | Prefill | Decode |
-| --- | ---: | ---: |
-| llama.cpp | 303.27 tok/s | 39.42 tok/s |
-| Qwen3.cpp | 43.20 tok/s | 40.62 tok/s |
+| Engine | Model | Prefill | Decode |
+| --- | --- | ---: | ---: |
+| Qwen3.cpp | Qwen3-0.6B | 207.59 tok/s | 51.93 tok/s |
+| Qwen3.cpp | Qwen3-4B | 16.08 tok/s | 8.02 tok/s |
+
+Both rows report the median results from five runs of a 91-token prompt followed
+by 16 fixed greedy decode steps. The binary was built with
+`CMAKE_BUILD_TYPE=Release` and `QWEN3_NATIVE_ARCH=ON`; generation used
+`--context-length 512 --max-tokens 16 --no-eos --greedy --threads 8`.
 
 ## License
 
