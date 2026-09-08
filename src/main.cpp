@@ -1,176 +1,210 @@
-#include "inference.h"
-
 #include <charconv>
+#include <cstdint>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
+
 #include <omp.h>
-#include <thread>
+
+#include "cpu_impl.h"
+#include "gpu_impl.h"
+#include "sampler.h"
+#include "tokenizer.h"
 
 namespace {
 
-auto DTypeName(TensorDType dtype) -> std::string {
-    switch (dtype) {
-        case TensorDType::Float32:
-            return "f32";
-        case TensorDType::BFloat16:
-            return "bf16";
-        case TensorDType::UInt8:
-            return "u8";
-        case TensorDType::Int32:
-            return "i32";
-    }
-    throw std::runtime_error("Unknown tensor dtype");
+enum class Device {
+    Cpu,
+    Gpu,
+};
+
+struct Options {
+    std::string model_path;
+    std::vector<std::int32_t> tokens;
+    std::optional<std::string> prompt;
+    Device device = Device::Cpu;
+    int context_length = 512;
+    std::size_t max_tokens = 128;
+    float temperature = Sampler::kDefaultTemperature;
+    std::optional<std::uint64_t> seed;
+    int threads = 0;
+    bool stop_on_eos = true;
+    bool raw_prompt = false;
+};
+
+void PrintUsage(std::ostream& out) {
+    out << "Usage: qwen3 --model PATH (--prompt TEXT | --tokens ID[,ID...]) [options]\n"
+           "\n"
+           "Options:\n"
+           "  --prompt TEXT       Text prompt to tokenize\n"
+           "  --tokens IDS       Pre-tokenized comma-separated token IDs\n"
+           "  --raw               Do not apply the Qwen chat template to --prompt\n"
+           "  --device DEVICE     Inference device: cpu or gpu (default: cpu)\n"
+           "  --context-length N  Runtime context length (default: 512)\n"
+           "  --max-tokens N      Maximum generated tokens (default: 128)\n"
+           "  --temperature N     Sampling temperature (default: 0.6)\n"
+           "  --seed N            Random seed for reproducible sampling\n"
+           "  --greedy            Use deterministic argmax sampling\n"
+           "  --threads N         OpenMP thread count\n"
+           "  --no-eos            Ignore EOS and generate exactly --max-tokens\n"
+           "  -h, --help          Show this help\n";
 }
 
-auto ParseIntegralOption(std::string_view value, std::string_view option) -> size_t {
-    std::size_t count = 0;
+template <typename T>
+T ParseInteger(std::string_view text, std::string_view option) {
+    T value{};
     const auto [end, error] =
-        std::from_chars(value.data(), value.data() + value.size(), count);
-    if (error != std::errc{} || end != value.data() + value.size()) {
-        throw std::invalid_argument(
-            std::string(option) + " requires a non-negative integer");
+        std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size()) {
+        throw std::invalid_argument(std::string(option) + " requires an integer");
     }
-    return count;
+    return value;
 }
 
-auto CompleteDecodedSize(std::string_view text) -> size_t {
-    constexpr auto replacement = std::string_view{"\xef\xbf\xbd"};
-    auto size = text.size();
-    while (size >= replacement.size() &&
-           text.substr(0, size).ends_with(replacement)) {
-        size -= replacement.size();
+std::vector<std::int32_t> ParseTokens(std::string_view text) {
+    if (text.empty()) {
+        throw std::invalid_argument("--tokens requires at least one token ID");
     }
-    return size;
+
+    std::vector<std::int32_t> result;
+    while (!text.empty()) {
+        const auto separator = text.find(',');
+        const auto item = text.substr(0, separator);
+        if (item.empty()) {
+            throw std::invalid_argument("--tokens contains an empty token ID");
+        }
+        result.push_back(ParseInteger<std::int32_t>(item, "--tokens"));
+        if (separator == std::string_view::npos) {
+            break;
+        }
+        text.remove_prefix(separator + 1);
+    }
+    return result;
+}
+
+Device ParseDevice(std::string_view value) {
+    if (value == "cpu") {
+        return Device::Cpu;
+    }
+    if (value == "gpu") {
+        return Device::Gpu;
+    }
+    throw std::invalid_argument("--device must be either cpu or gpu");
+}
+
+std::unique_ptr<Model> CreateModel(const Options& options) {
+    switch (options.device) {
+        case Device::Cpu:
+            return std::make_unique<CPUImpl>(
+                options.model_path, options.context_length);
+        case Device::Gpu:
+            return std::make_unique<GPUImpl>(
+                options.model_path, options.context_length);
+    }
+    throw std::invalid_argument("Unsupported inference device");
+}
+
+Options ParseOptions(int argc, char** argv) {
+    Options options;
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view option = argv[i];
+        const auto value = [&]() -> std::string_view {
+            if (++i >= argc) {
+                throw std::invalid_argument(std::string(option) + " requires a value");
+            }
+            return argv[i];
+        };
+
+        if (option == "--model") {
+            options.model_path = value();
+        } else if (option == "--device") {
+            options.device = ParseDevice(value());
+        } else if (option == "--prompt") {
+            options.prompt = value();
+        } else if (option == "--tokens") {
+            options.tokens = ParseTokens(value());
+        } else if (option == "--context-length") {
+            options.context_length = ParseInteger<int>(value(), option);
+        } else if (option == "--max-tokens") {
+            options.max_tokens = ParseInteger<std::size_t>(value(), option);
+        } else if (option == "--temperature") {
+            options.temperature = ParseInteger<float>(value(), option);
+        } else if (option == "--seed") {
+            options.seed = ParseInteger<std::uint64_t>(value(), option);
+        } else if (option == "--greedy") {
+            options.temperature = 0.0f;
+        } else if (option == "--threads") {
+            options.threads = ParseInteger<int>(value(), option);
+        } else if (option == "--no-eos") {
+            options.stop_on_eos = false;
+        } else if (option == "--raw") {
+            options.raw_prompt = true;
+        } else if (option == "-h" || option == "--help") {
+            PrintUsage(std::cout);
+            std::exit(0);
+        } else {
+            throw std::invalid_argument("Unknown option: " + std::string(option));
+        }
+    }
+
+    if (options.model_path.empty()) {
+        throw std::invalid_argument("--model is required");
+    }
+    if (options.prompt.has_value() == !options.tokens.empty()) {
+        throw std::invalid_argument("Provide exactly one of --prompt or --tokens");
+    }
+    if (options.context_length <= 0) {
+        throw std::invalid_argument("--context-length must be greater than zero");
+    }
+    if (options.threads < 0) {
+        throw std::invalid_argument("--threads must not be negative");
+    }
+    return options;
 }
 
 }  // namespace
 
-const int MAX_THREADS = std::thread::hardware_concurrency();
-
 int main(int argc, char** argv) {
     try {
-        const std::string model_path = argc > 1 ? argv[1] : "Qwen3.bin";
-        const std::string prompt = argc > 2 ? argv[2] : "Hello";
-        const int context_length = argc > 3 ? std::stoi(argv[3]) : 512;
-        auto apply_chat_template = true;
-        auto max_generated_tokens = size_t{512};
-        auto stop_on_eos = true;
-        auto token_limit_was_set = false;
-        auto num_threads = size_t{0};
-
-        for (auto i = 4; i < argc; ++i) {
-            const auto option = std::string_view(argv[i]);
-            if (option == "--raw") {
-                apply_chat_template = false;
-            } else if (option == "--max-tokens" || option == "--benchmark") {
-                if (token_limit_was_set) {
-                    throw std::invalid_argument(
-                        "--max-tokens and --benchmark cannot be combined");
-                }
-                if (++i >= argc) {
-                    throw std::invalid_argument(
-                        std::string(option) + " requires a token count");
-                }
-                max_generated_tokens = ParseIntegralOption(argv[i], option);
-                stop_on_eos = option != "--benchmark";
-                token_limit_was_set = true;
-            } else if (option == "--threads") {
-                if (++i >= argc) {
-                    throw std::invalid_argument(
-                        std::string(option) + " requires a thread count");
-                }
-                num_threads = ParseIntegralOption(argv[i], option);
-                if (num_threads > MAX_THREADS) {
-                    throw std::invalid_argument(
-                        std::string(option) + " should have count <= " + std::to_string(MAX_THREADS));
-                }
-            } else {
-                throw std::invalid_argument("Unknown option: " + std::string(option));
-            }
+        const Options options = ParseOptions(argc, argv);
+        if (options.threads > 0) {
+            omp_set_num_threads(options.threads);
         }
 
-        if (num_threads > 0) {
-            omp_set_num_threads(num_threads);
-        }
+        auto model = CreateModel(options);
+        const Tokenizer tokenizer(*model);
+        const auto prompt_tokens = options.prompt
+            ? tokenizer.Encode(
+                  options.raw_prompt ? *options.prompt : FormatChatPrompt(*options.prompt)
+              )
+            : options.tokens;
 
-        Qwen3 model(model_path, context_length);
-
-        const Config* config = model.GetConfig();
-        std::cout << "Loaded " << model_path << '\n';
-        std::cout << "arch=" << config->arch
-                  << " dtype=" << config->dtype
-                  << " dim=" << config->dim
-                  << " layers=" << config->n_layers
-                  << " heads=" << config->n_heads
-                  << " kv_heads=" << config->n_kv_heads
-                  << " vocab=" << config->vocab_size << '\n';
-        std::cout << "indexed_tensors=" << model.GetTensorIndex().size() << '\n';
-        std::cout << "bos_token=" << model.GetTokenizer().Token(model.GetTokenizer().BosTokenId()) << '\n';
-        std::cout << "eos_token=" << model.GetTokenizer().Token(model.GetTokenizer().EosTokenId()) << '\n';
-
-        const auto embed_it = model.GetTensorIndex().find("model.embed.weight");
-        if (embed_it != model.GetTensorIndex().end()) {
-            const TensorInfo& info = embed_it->second;
-            std::cout << "model.embed.weight "
-                      << DTypeName(info.dtype)
-                      << " [" << info.shape[0] << ", " << info.shape[1] << "] "
-                      << info.byte_size << " bytes\n";
-        }
-
-        std::cout << "Initialized inference with context=" << context_length << "\n";
-        std::cout << "Prompt: " << prompt << "\n";
-        if (!stop_on_eos) {
-            std::cout << "Fixed-token benchmark: " << max_generated_tokens
-                      << " decode steps\n";
-        }
-        auto streamed_text = std::string{};
-        const auto stream_tokens =
-            [&model, &streamed_text](std::span<const std::int32_t> tokens) {
-                const auto decoded = model.GetTokenizer().Decode(tokens);
-                const auto complete_size = CompleteDecodedSize(decoded);
-                if (complete_size < streamed_text.size() ||
-                    decoded.compare(0, streamed_text.size(), streamed_text) != 0) {
-                    return;
-                }
-                std::cout.write(
-                    decoded.data() + streamed_text.size(),
-                    static_cast<std::streamsize>(complete_size - streamed_text.size())
-                );
-                std::cout.flush();
-                streamed_text.assign(decoded.data(), complete_size);
-            };
-        const auto on_tokens =
-            stop_on_eos
-                ? std::function<void(std::span<const std::int32_t>)>{stream_tokens}
-                : std::function<void(std::span<const std::int32_t>)>{};
-        const GenerationResult result = model.Generate(
-            prompt,
-            apply_chat_template,
-            max_generated_tokens,
-            stop_on_eos,
-            on_tokens
+        const GenerationResult result = model->Generate(
+            prompt_tokens,
+            options.max_tokens,
+            options.stop_on_eos,
+            options.temperature,
+            options.seed
         );
-        if (result.text.starts_with(streamed_text)) {
-            std::cout << std::string_view(result.text).substr(streamed_text.size());
-        }
-        std::cout << '\n';
-        std::cout << std::fixed << std::setprecision(2)
+
+        std::cout << tokenizer.Decode(result.tokens) << '\n';
+        std::cout << '\n' << std::fixed << std::setprecision(2)
                   << "prefill: " << result.stats.prompt_tokens << " tokens, "
-                  << result.stats.prefill_seconds << " s, "
                   << result.stats.PrefillTokensPerSecond() << " tok/s\n"
                   << "decode: " << result.stats.generated_tokens << " tokens, "
-                  << result.stats.decode_seconds << " s, "
                   << result.stats.DecodeTokensPerSecond() << " tok/s\n"
                   << "stop_reason: "
-                  << (result.stats.stopped_on_eos ? "eos" : "token_limit")
-                  << '\n';
+                  << (result.stats.stopped_on_eos ? "eos" : "token_limit") << '\n';
     } catch (const std::exception& error) {
         std::cerr << "error: " << error.what() << '\n';
+        PrintUsage(std::cerr);
         return 1;
     }
-
     return 0;
 }

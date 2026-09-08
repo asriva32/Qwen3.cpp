@@ -71,6 +71,8 @@ Testing/
 .vscode
 .codex
 .agents
-__pycache__
-Qwen3.bin
+Qwen3-*/
+*.bin
+*.safetensors
+*.qwen3
 .bench/

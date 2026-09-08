@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes g++-14
+
+      - name: Configure
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: cmake -S . -B build/cmake -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build/cmake --parallel
+
+      - name: Test
+        run: ctest --test-dir build/cmake --output-on-failure
+
+      - name: Check command-line entry point
+        run: ./build/cmake/qwen3 --help
