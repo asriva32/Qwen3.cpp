@@ -47,7 +47,7 @@ struct State {
             projected = new float[batch_capacity * static_cast<size_t>(c->dim)];
             attn_scores = new float[batch_capacity * static_cast<size_t>(c->n_heads) * static_cast<size_t>(c->max_seq_len)];
         } else {
-
+            
         }
     }
 

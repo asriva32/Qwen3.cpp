@@ -1,6 +1,5 @@
 #ifndef LAYERS_H
 #define LAYERS_H
-#include <cuda_bf16.h>
 #include <stdfloat>
 #include <vector>
 #include <memory>
