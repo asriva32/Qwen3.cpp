@@ -10,8 +10,6 @@ find_package(OpenMP REQUIRED)
 add_library(qwen3_core STATIC
     src/backend/layers/layers.cpp
     src/backend/model/model.cpp
-    src/backend/model/cpu_impl.cpp
-    src/backend/model/gpu_impl.cpp
     src/backend/sampler/sampler.cpp
     src/backend/tokenizer/tokenizer.cpp
     src/backend/utils/loader.cpp

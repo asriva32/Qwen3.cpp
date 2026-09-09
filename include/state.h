@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 #include "config.h"
+#include "utils.h"
 
 inline constexpr size_t kPrefillBatchSize = 128;
 
@@ -12,38 +13,58 @@ inline constexpr size_t kPrefillBatchSize = 128;
 // Something like one arena per thread
 // separate arena for q, k, v, projected, norm_buffer
 struct State {
-    // From RMSNorm
-    std::vector<float> lin1;
-    std::vector<float> lin2;
+    // From ffn
+    float* lin1;
+    float* lin2;
     // From Block
-    std::vector<float> norm_buffer;
-    std::vector<float> q;
-    std::vector<float> k;
-    std::vector<float> v;
-    std::vector<float> attn_output;
-    std::vector<float> projected;
-    std::vector<float> attn_scores;
+    float* norm_buffer;
+    float* q;
+    float* k;
+    float* v;
+    float* attn_output;
+    float* projected;
+    float* attn_scores;
     size_t batch_capacity;
+    Device device;
 
-    explicit State(Config *c)
+    explicit State(Config *c, Device device)
         : batch_capacity(std::min(
             kPrefillBatchSize,
             static_cast<size_t>(c->max_seq_len)
-        )) {
+        ))
+        , device(device) {
         const auto q_dim = c->n_heads * c->head_dim;
         const auto kv_dim = c->n_kv_heads * c->head_dim;
 
-        lin1.resize(batch_capacity * static_cast<size_t>(c->hidden_dim));
-        lin2.resize(batch_capacity * static_cast<size_t>(c->hidden_dim));
-        norm_buffer.resize(batch_capacity * static_cast<size_t>(c->dim));
-        q.resize(batch_capacity * static_cast<size_t>(q_dim));
-        k.resize(batch_capacity * static_cast<size_t>(kv_dim));
-        v.resize(batch_capacity * static_cast<size_t>(kv_dim));
-        attn_output.resize(batch_capacity * static_cast<size_t>(q_dim));
-        projected.resize(batch_capacity * static_cast<size_t>(c->dim));
-        attn_scores.resize(
-            batch_capacity * static_cast<size_t>(c->n_heads) * static_cast<size_t>(c->max_seq_len)
-        );
+        if (device == Device::CPU) {
+            lin1 = new float[batch_capacity * static_cast<size_t>(c->hidden_dim)];
+            lin2 = new float[batch_capacity * static_cast<size_t>(c->hidden_dim)];
+            norm_buffer = new float[batch_capacity * static_cast<size_t>(c->dim)];
+            q = new float[batch_capacity * static_cast<size_t>(q_dim)];
+            k = new float[batch_capacity * static_cast<size_t>(kv_dim)];
+            v = new float[batch_capacity * static_cast<size_t>(kv_dim)];
+            attn_output = new float[batch_capacity * static_cast<size_t>(q_dim)];
+            projected = new float[batch_capacity * static_cast<size_t>(c->dim)];
+            attn_scores = new float[batch_capacity * static_cast<size_t>(c->n_heads) * static_cast<size_t>(c->max_seq_len)];
+        } else {
+
+        }
+    }
+
+    ~State() {
+        if (device == Device::CPU) {
+            delete lin1;
+            delete lin2;
+            delete norm_buffer;
+            delete q;
+            delete k;
+            delete v;
+            delete attn_output;
+            delete projected;
+            delete attn_scores;
+        } else {
+
+        }
     }
 };
 

@@ -236,7 +236,7 @@ auto LoadTensorBytes(
 
 // Load Model 
 
-Model::Model(const std::string& path) {
+Model::Model(const std::string& path, int context_length, Device device) : device(device) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         throw std::runtime_error("Failed to open model file: " + path);
@@ -272,6 +272,8 @@ Model::Model(const std::string& path) {
         }
         SkipBytes(in, info.byte_size);
     }
+
+    InitializeInference(context_length);
 }
 
 // Load Config

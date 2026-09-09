@@ -3,23 +3,27 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdfloat>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 #include "config.h"
+#include "layers.h"
 #include "state.h"
 #include "utils.h"
 
 
 class Model {
 public:
-    explicit Model(const std::string& path);
-    virtual ~Model() = default;
+    using TokenCallback = std::function<void(std::int32_t)>;
+
+    explicit Model(const std::string& path, int context_length = 512, Device device = Device::CPU);
 
     Model(const Model&) = delete;
     Model& operator=(const Model&) = delete;
@@ -47,22 +51,14 @@ public:
         std::memcpy(data.data(), bytes.data(), bytes.size());
         return Tensor<T>{info, std::move(data)};
     }
-
-    virtual void Prefill(const std::span<const std::int32_t> tokens, int pos, State &state) = 0;
-    virtual void ForwardToken(std::int32_t token, int pos, State &state) = 0;
-    virtual GenerationResult Generate(
+    GenerationResult Generate(
         const std::vector<std::int32_t>& prompt_tokens,
         size_t max_generated_tokens = 512,
         bool stop_on_eos = true,
         float temperature = 0.6f,
-        std::optional<std::uint64_t> seed = std::nullopt
-    ) = 0;
-
-protected:
-    template <SupportedTensorElement T>
-    auto LoadTensorData(const std::string& name) const -> std::vector<T> {
-        return LoadTensor<T>(name).data;
-    }
+        std::optional<std::uint64_t> seed = std::nullopt,
+        const TokenCallback& on_token = {}
+    );
 
     const Config& GetInferenceConfig() const noexcept {
         return *inference_config_;
@@ -73,13 +69,28 @@ protected:
     }
 
 private:
-    virtual void InitializeBackend() = 0;
-    virtual void ResetBackend() = 0;
+    template <SupportedTensorElement T>
+    auto LoadTensorData(const std::string& name) const -> std::vector<T> {
+        return LoadTensor<T>(name).data;
+    }
+
+    void PrefillCPU(const std::span<const std::int32_t> tokens, int pos, State &state);
+    void ForwardTokenCPU(std::int32_t token, int pos, State &state);
+    void PrefillGPU(const std::span<const std::int32_t> tokens, int pos, State &state);
+    void ForwardTokenGPU(std::int32_t token, int pos, State &state);
 
     std::string model_path_;
     std::unordered_map<std::string, TensorInfo> tensors_;
     std::shared_ptr<Config> inference_config_;
     int model_max_seq_len_ = 0;
+    std::vector<Block> blocks_;
+    std::vector<std::bfloat16_t> embedding_;
+    std::vector<std::bfloat16_t> final_norm_;
+    std::vector<std::bfloat16_t> output_;
+    std::vector<float> hidden_state_;
+    std::vector<float> normalized_state_;
+    std::vector<float> logits_;
+    Device device;
 };
 
 #endif

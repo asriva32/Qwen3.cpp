@@ -36,7 +36,8 @@ chat template by default:
   --threads 8
 ```
 
-The executable writes decoded text followed by prefill and decode statistics.
+The executable streams decoded text token by token, then writes prefill and
+decode statistics.
 Use `--raw` to skip the chat template, `--tokens` to supply exact input token
 IDs, or `--no-eos` to run exactly the requested number of decode steps.
 

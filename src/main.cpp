@@ -3,7 +3,6 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
-#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -12,23 +11,16 @@
 
 #include <omp.h>
 
-#include "cpu_impl.h"
-#include "gpu_impl.h"
+#include "model.h"
 #include "sampler.h"
 #include "tokenizer.h"
 
 namespace {
 
-enum class Device {
-    Cpu,
-    Gpu,
-};
-
 struct Options {
     std::string model_path;
     std::vector<std::int32_t> tokens;
     std::optional<std::string> prompt;
-    Device device = Device::Cpu;
     int context_length = 512;
     std::size_t max_tokens = 128;
     float temperature = Sampler::kDefaultTemperature;
@@ -36,6 +28,7 @@ struct Options {
     int threads = 0;
     bool stop_on_eos = true;
     bool raw_prompt = false;
+    std::string device;
 };
 
 void PrintUsage(std::ostream& out) {
@@ -45,7 +38,6 @@ void PrintUsage(std::ostream& out) {
            "  --prompt TEXT       Text prompt to tokenize\n"
            "  --tokens IDS       Pre-tokenized comma-separated token IDs\n"
            "  --raw               Do not apply the Qwen chat template to --prompt\n"
-           "  --device DEVICE     Inference device: cpu or gpu (default: cpu)\n"
            "  --context-length N  Runtime context length (default: 512)\n"
            "  --max-tokens N      Maximum generated tokens (default: 128)\n"
            "  --temperature N     Sampling temperature (default: 0.6)\n"
@@ -88,28 +80,6 @@ std::vector<std::int32_t> ParseTokens(std::string_view text) {
     return result;
 }
 
-Device ParseDevice(std::string_view value) {
-    if (value == "cpu") {
-        return Device::Cpu;
-    }
-    if (value == "gpu") {
-        return Device::Gpu;
-    }
-    throw std::invalid_argument("--device must be either cpu or gpu");
-}
-
-std::unique_ptr<Model> CreateModel(const Options& options) {
-    switch (options.device) {
-        case Device::Cpu:
-            return std::make_unique<CPUImpl>(
-                options.model_path, options.context_length);
-        case Device::Gpu:
-            return std::make_unique<GPUImpl>(
-                options.model_path, options.context_length);
-    }
-    throw std::invalid_argument("Unsupported inference device");
-}
-
 Options ParseOptions(int argc, char** argv) {
     Options options;
     for (int i = 1; i < argc; ++i) {
@@ -123,8 +93,6 @@ Options ParseOptions(int argc, char** argv) {
 
         if (option == "--model") {
             options.model_path = value();
-        } else if (option == "--device") {
-            options.device = ParseDevice(value());
         } else if (option == "--prompt") {
             options.prompt = value();
         } else if (option == "--tokens") {
@@ -145,6 +113,8 @@ Options ParseOptions(int argc, char** argv) {
             options.stop_on_eos = false;
         } else if (option == "--raw") {
             options.raw_prompt = true;
+        } else if (option == "--device") {
+            options.device = value();
         } else if (option == "-h" || option == "--help") {
             PrintUsage(std::cout);
             std::exit(0);
@@ -177,23 +147,26 @@ int main(int argc, char** argv) {
             omp_set_num_threads(options.threads);
         }
 
-        auto model = CreateModel(options);
-        const Tokenizer tokenizer(*model);
+        Model model(options.model_path, options.context_length, (options.device == "cpu" ? Device::CPU : Device::GPU));
+        const Tokenizer tokenizer(model);
         const auto prompt_tokens = options.prompt
             ? tokenizer.Encode(
                   options.raw_prompt ? *options.prompt : FormatChatPrompt(*options.prompt)
               )
             : options.tokens;
 
-        const GenerationResult result = model->Generate(
+        const GenerationResult result = model.Generate(
             prompt_tokens,
             options.max_tokens,
             options.stop_on_eos,
             options.temperature,
-            options.seed
+            options.seed,
+            [&](std::int32_t token) {
+                std::cout << tokenizer.Token(token) << std::flush;
+            }
         );
 
-        std::cout << tokenizer.Decode(result.tokens) << '\n';
+        std::cout << '\n';
         std::cout << '\n' << std::fixed << std::setprecision(2)
                   << "prefill: " << result.stats.prompt_tokens << " tokens, "
                   << result.stats.PrefillTokensPerSecond() << " tok/s\n"

@@ -93,8 +93,8 @@ auto Block::ForwardPrefill(
     const auto q_dim = config->n_heads * config->head_dim;
     const auto kv_dim = config->n_kv_heads * config->head_dim;
 
-    RmsNorm(
-        norm_buffer.data(),
+    rmsnorm_cpu(
+        norm_buffer,
         x,
         weights.attn_norm.data(),
         config->norm_eps,
@@ -103,26 +103,26 @@ auto Block::ForwardPrefill(
     );
 
     // Batched Q/K/V projections over row-major token inputs.
-    MatMul(
-        q.data(),
-        norm_buffer.data(),
+    matmul_cpu(
+        q,
+        norm_buffer,
         weights.wq.data(),
         q_dim,
         config->dim,
         batch_size
     );
-    MatMul(
-        k.data(),
-        norm_buffer.data(),
+    matmul_cpu(
+        k,
+        norm_buffer,
         weights.wk.data(),
         kv_dim,
         config->dim,
         batch_size
     );
 
-    MatMul(
-        v.data(),
-        norm_buffer.data(),
+    matmul_cpu(
+        v,
+        norm_buffer,
         weights.wv.data(),
         kv_dim,
         config->dim,
@@ -133,8 +133,8 @@ auto Block::ForwardPrefill(
     #pragma omp parallel for collapse(2)
     for (size_t t = 0; t < num_tokens; ++t) {
         for (int head = 0; head < config->n_heads; ++head) {
-            auto* q_head = q.data() + t * q_dim + head * config->head_dim;
-            RmsNorm(q_head, q_head, weights.q_norm.data(), config->norm_eps,
+            auto* q_head = q + t * q_dim + head * config->head_dim;
+            rmsnorm_cpu(q_head, q_head, weights.q_norm.data(), config->norm_eps,
                     config->head_dim);
         }
     }
@@ -142,8 +142,8 @@ auto Block::ForwardPrefill(
     #pragma omp parallel for collapse(2)
     for (size_t t = 0; t < num_tokens; ++t) {
         for (int head = 0; head < config->n_kv_heads; ++head) {
-            auto* k_head = k.data() + t * kv_dim + head * config->head_dim;
-            RmsNorm(k_head, k_head, weights.k_norm.data(), config->norm_eps,
+            auto* k_head = k + t * kv_dim + head * config->head_dim;
+            rmsnorm_cpu(k_head, k_head, weights.k_norm.data(), config->norm_eps,
                     config->head_dim);
         }
     }
@@ -154,8 +154,8 @@ auto Block::ForwardPrefill(
     for (size_t t = 0; t < num_tokens; ++t) {
         const auto token_pos = pos + static_cast<int>(t);
 
-        ApplyRotaryEmb(
-            q.data() + t * q_dim,
+        rope_cpu(
+            q + t * q_dim,
             q_dim,
             config->head_dim,
             token_pos,
@@ -163,8 +163,8 @@ auto Block::ForwardPrefill(
             config->rotary_dim
         );
 
-        ApplyRotaryEmb(
-            k.data() + t * kv_dim,
+        rope_cpu(
+            k + t * kv_dim,
             kv_dim,
             config->head_dim,
             token_pos,
@@ -177,8 +177,8 @@ auto Block::ForwardPrefill(
     #pragma omp parallel for
     for (size_t t = 0; t < num_tokens; ++t) {
         const auto kv_pos = start + t;
-        const float* k_token = k.data() + t * kv_dim;
-        const float* v_token = v.data() + t * kv_dim;
+        const float* k_token = k + t * kv_dim;
+        const float* v_token = v + t * kv_dim;
         auto* cache_k = cache.k_.data() + kv_pos * kv_dim;
         auto* cache_v = cache.v_.data() + kv_pos * kv_dim;
 
@@ -199,10 +199,10 @@ auto Block::ForwardPrefill(
             const int kv_head = head / queries_per_kv_head;
 
             const auto kv_len = pos + static_cast<int>(t) + 1;
-            FastAttn(
-                attn_output.data() + t * q_dim + head * config->head_dim,
-                attn_scores.data() + (t * config->n_heads + head) * config->max_seq_len,
-                q.data() + t * q_dim + head * config->head_dim,
+            attn_cpu(
+                attn_output + t * q_dim + head * config->head_dim,
+                attn_scores + (t * config->n_heads + head) * config->max_seq_len,
+                q + t * q_dim + head * config->head_dim,
                 cache.k_.data() + kv_head * config->head_dim,
                 cache.v_.data() + kv_head * config->head_dim,
                 config->head_dim,
@@ -214,9 +214,9 @@ auto Block::ForwardPrefill(
 
     // output projection
 
-    MatMul(
-        projected.data(),
-        attn_output.data(),
+    matmul_cpu(
+        projected,
+        attn_output,
         weights.wo.data(),
         config->dim,
         q_dim,
@@ -233,8 +233,8 @@ auto Block::ForwardPrefill(
 
     // MLP
 
-    RmsNorm(
-        norm_buffer.data(),
+    rmsnorm_cpu(
+        norm_buffer,
         x,
         weights.mlp_norm.data(),
         config->norm_eps,
@@ -244,11 +244,11 @@ auto Block::ForwardPrefill(
 
     
     // batched ffn
-    FeedForwardNetwork(
-        projected.data(),
-        state.lin1.data(),
-        state.lin2.data(),
-        norm_buffer.data(),
+    ffn_cpu(
+        projected,
+        state.lin1,
+        state.lin2,
+        norm_buffer,
         weights.w1.data(),
         weights.w2.data(),
         weights.w3.data(),
@@ -289,22 +289,22 @@ auto Block::Forward(
     const auto q_dim = config->n_heads * config->head_dim;
     const auto kv_dim = config->n_kv_heads * config->head_dim;
 
-    RmsNorm(norm_buffer.data(), x, weights.attn_norm.data() , config->norm_eps, config->dim);
-    MatMul(q.data(), norm_buffer.data(), weights.wq.data(), q_dim, config->dim);
-    MatMul(k.data(), norm_buffer.data(), weights.wk.data(), kv_dim, config->dim);
-    MatMul(v.data(), norm_buffer.data(), weights.wv.data(), kv_dim, config->dim);
+    rmsnorm_cpu(norm_buffer, x, weights.attn_norm.data() , config->norm_eps, config->dim);
+    matmul_cpu(q, norm_buffer, weights.wq.data(), q_dim, config->dim);
+    matmul_cpu(k, norm_buffer, weights.wk.data(), kv_dim, config->dim);
+    matmul_cpu(v, norm_buffer, weights.wv.data(), kv_dim, config->dim);
     
     for (auto head = 0; head < config->n_heads; ++head) {
-        auto* q_head = q.data() + head * config->head_dim;
-        RmsNorm(q_head, q_head, weights.q_norm.data(), config->norm_eps, config->head_dim);
+        auto* q_head = q + head * config->head_dim;
+        rmsnorm_cpu(q_head, q_head, weights.q_norm.data(), config->norm_eps, config->head_dim);
     }
     for (auto head = 0; head < config->n_kv_heads; ++head) {
-        auto* k_head = k.data() + head * config->head_dim;
-        RmsNorm(k_head, k_head, weights.k_norm.data(), config->norm_eps, config->head_dim);
+        auto* k_head = k + head * config->head_dim;
+        rmsnorm_cpu(k_head, k_head, weights.k_norm.data(), config->norm_eps, config->head_dim);
     }
 
-    ApplyRotaryEmb(q.data(), q_dim, config->head_dim, pos, config->rope_theta, config->rotary_dim);
-    ApplyRotaryEmb(k.data(), kv_dim, config->head_dim, pos, config->rope_theta, config->rotary_dim);
+    rope_cpu(q, q_dim, config->head_dim, pos, config->rope_theta, config->rotary_dim);
+    rope_cpu(k, kv_dim, config->head_dim, pos, config->rope_theta, config->rotary_dim);
 
     for (auto i = 0; i < kv_dim; i++) {
         cache.k_[i + kv_pos * kv_dim] = static_cast<std::bfloat16_t>(k[i]);
@@ -316,7 +316,7 @@ auto Block::Forward(
         for (auto i = 0; i < kv_dim; i++) {
             k[i] = static_cast<float>(cache.k_[sink * kv_dim + i]);
         }
-        ApplyRotaryEmb(k.data(), kv_dim, config->head_dim, 1, config->rope_theta, config->rotary_dim);
+        rope_cpu(k, kv_dim, config->head_dim, 1, config->rope_theta, config->rotary_dim);
 
         for (auto i = 0; i < kv_dim; i++) {
             cache.k_[sink * kv_dim + i] = static_cast<std::bfloat16_t>(k[i]);
@@ -328,10 +328,10 @@ auto Block::Forward(
     #pragma omp parallel for private(head)
     for (head = 0; head < config->n_heads; ++head) {
         const auto kv_head = head / queries_per_kv_head;
-        FastAttn(
-            attn_output.data() + head * config->head_dim,
-            attn_scores.data() + head * config->max_seq_len,
-            q.data() + head * config->head_dim,
+        attn_cpu(
+            attn_output + head * config->head_dim,
+            attn_scores + head * config->max_seq_len,
+            q + head * config->head_dim,
             cache.k_.data() + kv_head * config->head_dim,
             cache.v_.data() + kv_head * config->head_dim,
             config->head_dim,
@@ -340,17 +340,17 @@ auto Block::Forward(
         );
     }
 
-    MatMul(projected.data(), attn_output.data(), weights.wo.data(), config->dim, q_dim);
+    matmul_cpu(projected, attn_output, weights.wo.data(), config->dim, q_dim);
     for (auto i = 0; i < config->dim; ++i) {
         x[i] += projected[i];
     }
 
-    RmsNorm(norm_buffer.data(), x, weights.mlp_norm.data(), config->norm_eps, config->dim);
-    FeedForwardNetwork(
-        projected.data(),
-        state.lin1.data(),
-        state.lin2.data(),
-        norm_buffer.data(),
+    rmsnorm_cpu(norm_buffer, x, weights.mlp_norm.data(), config->norm_eps, config->dim);
+    ffn_cpu(
+        projected,
+        state.lin1,
+        state.lin2,
+        norm_buffer,
         weights.w1.data(),
         weights.w2.data(),
         weights.w3.data(),
@@ -402,8 +402,8 @@ auto FastDotProduct(const std::bfloat16_t *w_row, const float *x, int m) -> floa
 }
 
 // Layers
-// tentative implementation
-auto RmsNorm(
+
+auto rmsnorm_cpu(
     float* out,
     const float* x,
     const std::bfloat16_t* weight,
@@ -467,7 +467,7 @@ static auto RmsNormHelper(
 
 }
 
-auto Softmax(
+auto softmax_cpu(
     float *out,
     const float *x, 
     int n
@@ -491,11 +491,11 @@ auto Softmax(
 
 }
 
-auto Silu(float x) -> float {
+auto silu_cpu(float x) -> float {
     return x / (1.0f + expf(-x));
 }
 
-auto MatMul(
+auto matmul_cpu(
     float *out,
     const float* x, 
     const std::bfloat16_t* w,
@@ -524,7 +524,7 @@ auto MatMul(
     }
 }
 
-auto ApplyRotaryEmb(
+auto rope_cpu(
     float *out,
     int d,
     int head_dim,
@@ -549,7 +549,7 @@ auto ApplyRotaryEmb(
     }
 }
 
-auto FeedForwardNetwork(
+auto ffn_cpu(
     float *out,
     float *lin1,
     float *lin2,
@@ -562,19 +562,19 @@ auto FeedForwardNetwork(
     int batch_size
 ) -> void {
     
-    MatMul(lin1, x, w1, hidden_dim, dim, batch_size);
-    MatMul(lin2, x, w3, hidden_dim, dim, batch_size);
+    matmul_cpu(lin1, x, w1, hidden_dim, dim, batch_size);
+    matmul_cpu(lin2, x, w3, hidden_dim, dim, batch_size);
     
     const auto count = batch_size * hidden_dim;
     for (auto i = 0; i < count; i++) {
-        lin1[i] = Silu(lin1[i]) * lin2[i];
+        lin1[i] = silu_cpu(lin1[i]) * lin2[i];
     }
 
-    MatMul(out, lin1, w2, dim, hidden_dim, batch_size);
+    matmul_cpu(out, lin1, w2, dim, hidden_dim, batch_size);
     
 }
 
-auto FastAttn(
+auto attn_cpu(
     float *out, // (dim, )
     float *atth, // (kv_len, ) - to hold attn scores
     const float *q, // (head_dim, )
@@ -593,7 +593,7 @@ auto FastAttn(
         atth[i] = score;
     }
 
-    Softmax(atth, atth, kv_len);
+    softmax_cpu(atth, atth, kv_len);
     for (auto i = 0; i < head_dim; i++) {
         out[i] = 0.0f;
     }

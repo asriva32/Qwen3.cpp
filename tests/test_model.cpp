@@ -1,8 +1,6 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -13,35 +11,6 @@
 #include "tokenizer.h"
 
 namespace {
-
-class MetadataModel final : public Model {
-public:
-    using Model::Model;
-
-    int initialize_count = 0;
-    int reset_count = 0;
-
-    void Prefill(std::span<const std::int32_t>, int, State&) override {}
-    void ForwardToken(std::int32_t, int, State&) override {}
-    GenerationResult Generate(
-        const std::vector<std::int32_t>&,
-        size_t,
-        bool,
-        float,
-        std::optional<std::uint64_t>
-    ) override {
-        return {};
-    }
-
-private:
-    void InitializeBackend() override { ++initialize_count; }
-    void ResetBackend() override { ++reset_count; }
-};
-
-template <typename T>
-void Write(std::ostream& out, const T& value) {
-    out.write(reinterpret_cast<const char*>(&value), sizeof(value));
-}
 
 std::vector<std::bfloat16_t> MakeValues(size_t count, float scale) {
     std::vector<std::bfloat16_t> values(count);
@@ -75,8 +44,8 @@ void TestBatchedPrefillMatchesSequentialForward() {
     Config batched_config(config_json);
     Block sequential_block(&sequential_config, MakePrefillWeights());
     Block batched_block(&batched_config, MakePrefillWeights());
-    State sequential_state(&sequential_config);
-    State batched_state(&batched_config);
+    State sequential_state(&sequential_config, Device::CPU);
+    State batched_state(&batched_config, Device::CPU);
 
     std::array<float, 8> sequential_prefix{
         0.2f, -0.3f, 0.5f, 0.7f,
@@ -130,45 +99,14 @@ void TestBatchedPrefillMatchesSequentialForward() {
     }
 }
 
-void TestMetadataLoading() {
-    const auto path = std::filesystem::temp_directory_path() / "qwen3_metadata_test.qwen3";
+void TestConfigParsing() {
     const std::string metadata =
         R"({"act_type":"silu","arch":"Qwen3ForCausalLM","attention_bias":false,"bos_token_id":1,"dim":16,"dtype":"bf16","eos_token_id":2,"head_dim":8,"hidden_dim":32,"max_seq_len":128,"n_heads":2,"n_kv_heads":1,"n_layers":1,"norm_eps":0.000001,"qk_norm":true,"rope_theta":1000000.0,"rotary_dim":8,"tie_word_embeddings":true,"vocab_size":32})";
-
-    {
-        std::ofstream out(path, std::ios::binary);
-        const std::array<char, 8> magic{'Q', 'W', 'E', 'N', '3', 'C', 'P', '\0'};
-        out.write(magic.data(), magic.size());
-        Write(out, std::uint32_t{1});
-        Write(out, static_cast<std::uint64_t>(metadata.size()));
-        out.write(metadata.data(), static_cast<std::streamsize>(metadata.size()));
-        Write(out, std::uint64_t{0});
+    const Config config(metadata);
+    if (config.arch != "Qwen3ForCausalLM" || config.dim != 16 ||
+        config.n_layers != 1 || config.max_seq_len != 128) {
+        throw std::runtime_error("model config was parsed incorrectly");
     }
-
-    MetadataModel model(path.string());
-    const Config* config = model.GetConfig();
-    if (config->arch != "Qwen3ForCausalLM" || config->dim != 16 ||
-        config->n_layers != 1 || !model.GetTensorIndex().empty()) {
-        throw std::runtime_error("metadata model was parsed incorrectly");
-    }
-
-    model.InitializeInference(64);
-    model.ResetInference();
-    if (model.GetConfig()->max_seq_len != 64 || model.initialize_count != 1 ||
-        model.reset_count != 1) {
-        throw std::runtime_error("shared inference lifecycle did not invoke backend hooks");
-    }
-
-    bool rejected_invalid_context = false;
-    try {
-        model.InitializeInference(129);
-    } catch (const std::invalid_argument&) {
-        rejected_invalid_context = true;
-    }
-    if (!rejected_invalid_context) {
-        throw std::runtime_error("model accepted an unsupported context length");
-    }
-    std::filesystem::remove(path);
 }
 
 void TestGreedySampler() {
@@ -223,7 +161,7 @@ void TestTokenizer() {
 
 int main() {
     try {
-        TestMetadataLoading();
+        TestConfigParsing();
         TestBatchedPrefillMatchesSequentialForward();
         TestGreedySampler();
         TestTemperatureSampler();

@@ -302,15 +302,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Convert a Hugging Face Qwen3 model directory into a .qwen3 binary."
     )
-    parser.add_argument("output", type=Path, help="Output .qwen3 file")
+    parser.add_argument("--output", type=Path, help="Output .qwen3 file")
     parser.add_argument(
-        "input",
+        "--input",
         type=Path,
         nargs="?",
         default=Path("Qwen3-0.6B"),
         help="Input Hugging Face model directory, default: Qwen3-0.6B",
     )
-    parser.add_argument("--dtype", choices=sorted(SUPPORTED_DTYPES), default="fp32")
+    parser.add_argument("--dtype", choices=sorted(SUPPORTED_DTYPES), default="bf16")
     args = parser.parse_args()
 
     convert(args.input, args.output, args.dtype)

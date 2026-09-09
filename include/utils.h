@@ -93,4 +93,9 @@ std::vector<std::uint8_t> LoadTensorBytes(
     size_t element_size
 );
 
+enum class Device {
+    CPU,
+    GPU
+};
+
 #endif
