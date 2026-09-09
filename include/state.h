@@ -53,15 +53,15 @@ struct State {
 
     ~State() {
         if (device == Device::CPU) {
-            delete lin1;
-            delete lin2;
-            delete norm_buffer;
-            delete q;
-            delete k;
-            delete v;
-            delete attn_output;
-            delete projected;
-            delete attn_scores;
+            delete[] lin1;
+            delete[] lin2;
+            delete[] norm_buffer;
+            delete[] q;
+            delete[] k;
+            delete[] v;
+            delete[] attn_output;
+            delete[] projected;
+            delete[] attn_scores;
         } else {
 
         }
