@@ -7,11 +7,13 @@
 #include "config.h"
 #include "utils.h"
 
+extern "C" void* upload_cuda(void* device, size_t size);
+extern "C" void* allocate_cuda_zeroed(size_t size);
+extern "C" void zero_cuda(void* device, size_t size);
+extern "C" void free_cuda(void* device);
+
 inline constexpr size_t kPrefillBatchSize = 128;
 
-// TODO: migrate to an arena
-// Something like one arena per thread
-// separate arena for q, k, v, projected, norm_buffer
 struct State {
     // From ffn
     float* lin1;
@@ -37,17 +39,28 @@ struct State {
         const auto kv_dim = c->n_kv_heads * c->head_dim;
 
         if (device == Device::CPU) {
-            lin1 = new float[batch_capacity * static_cast<size_t>(c->hidden_dim)];
-            lin2 = new float[batch_capacity * static_cast<size_t>(c->hidden_dim)];
+            lin1        = new float[batch_capacity * static_cast<size_t>(c->hidden_dim)];
+            lin2        = new float[batch_capacity * static_cast<size_t>(c->hidden_dim)];
             norm_buffer = new float[batch_capacity * static_cast<size_t>(c->dim)];
-            q = new float[batch_capacity * static_cast<size_t>(q_dim)];
-            k = new float[batch_capacity * static_cast<size_t>(kv_dim)];
-            v = new float[batch_capacity * static_cast<size_t>(kv_dim)];
+            q           = new float[batch_capacity * static_cast<size_t>(q_dim)];
+            k           = new float[batch_capacity * static_cast<size_t>(kv_dim)];
+            v           = new float[batch_capacity * static_cast<size_t>(kv_dim)];
             attn_output = new float[batch_capacity * static_cast<size_t>(q_dim)];
-            projected = new float[batch_capacity * static_cast<size_t>(c->dim)];
-            attn_scores = new float[batch_capacity * static_cast<size_t>(c->n_heads) * static_cast<size_t>(c->max_seq_len)];
+            projected   = new float[batch_capacity * static_cast<size_t>(c->dim)];
+            attn_scores = new float[batch_capacity * static_cast<size_t>(c->n_heads) 
+                * static_cast<size_t>(c->max_seq_len)];
         } else {
-            
+            // temporary
+            lin1        = new float[batch_capacity * static_cast<size_t>(c->hidden_dim)];
+            lin2        = new float[batch_capacity * static_cast<size_t>(c->hidden_dim)];
+            norm_buffer = new float[batch_capacity * static_cast<size_t>(c->dim)];
+            q           = new float[batch_capacity * static_cast<size_t>(q_dim)];
+            k           = new float[batch_capacity * static_cast<size_t>(kv_dim)];
+            v           = new float[batch_capacity * static_cast<size_t>(kv_dim)];
+            attn_output = new float[batch_capacity * static_cast<size_t>(q_dim)];
+            projected   = new float[batch_capacity * static_cast<size_t>(c->dim)];
+            attn_scores = new float[batch_capacity * static_cast<size_t>(c->n_heads) 
+                * static_cast<size_t>(c->max_seq_len)];
         }
     }
 
@@ -63,7 +76,16 @@ struct State {
             delete[] projected;
             delete[] attn_scores;
         } else {
-
+            // temporary
+            delete[] lin1;
+            delete[] lin2;
+            delete[] norm_buffer;
+            delete[] q;
+            delete[] k;
+            delete[] v;
+            delete[] attn_output;
+            delete[] projected;
+            delete[] attn_scores;
         }
     }
 };

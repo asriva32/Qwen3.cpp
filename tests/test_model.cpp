@@ -4,6 +4,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <utility>
 
 #include "model.h"
 #include "layers.h"
@@ -21,82 +23,61 @@ std::vector<std::bfloat16_t> MakeValues(size_t count, float scale) {
     return values;
 }
 
-BlockWeights MakePrefillWeights() {
-    BlockWeights weights;
-    weights.attn_norm.assign(4, static_cast<std::bfloat16_t>(1.0f));
-    weights.q_norm.assign(2, static_cast<std::bfloat16_t>(1.0f));
-    weights.k_norm.assign(2, static_cast<std::bfloat16_t>(1.0f));
-    weights.wq = MakeValues(16, 0.07f);
-    weights.wk = MakeValues(8, 0.05f);
-    weights.wv = MakeValues(8, 0.09f);
-    weights.wo = MakeValues(16, 0.04f);
-    weights.mlp_norm.assign(4, static_cast<std::bfloat16_t>(1.0f));
-    weights.w1 = MakeValues(24, 0.03f);
-    weights.w2 = MakeValues(24, 0.02f);
-    weights.w3 = MakeValues(24, 0.025f);
-    return weights;
-}
+static_assert(!std::is_copy_constructible_v<Block>);
+static_assert(!std::is_copy_assignable_v<Block>);
+static_assert(std::is_nothrow_move_constructible_v<Block>);
+static_assert(std::is_nothrow_move_assignable_v<Block>);
 
-void TestBatchedPrefillMatchesSequentialForward() {
-    const std::string config_json =
-        R"({"act_type":"silu","arch":"Qwen3ForCausalLM","attention_bias":false,"bos_token_id":1,"dim":4,"dtype":"bf16","eos_token_id":2,"head_dim":2,"hidden_dim":6,"max_seq_len":8,"n_heads":2,"n_kv_heads":1,"n_layers":1,"norm_eps":0.000001,"qk_norm":true,"rope_theta":10000.0,"rotary_dim":2,"tie_word_embeddings":true,"vocab_size":16})";
-    Config sequential_config(config_json);
-    Config batched_config(config_json);
-    Block sequential_block(&sequential_config, MakePrefillWeights());
-    Block batched_block(&batched_config, MakePrefillWeights());
-    State sequential_state(&sequential_config, Device::CPU);
-    State batched_state(&batched_config, Device::CPU);
+void TestBatchedMatmulMatchesSequentialMatmul() {
+    constexpr int batch_size = 3;
+    constexpr int n = 5;
+    constexpr int m = 4;
 
-    std::array<float, 8> sequential_prefix{
+    const std::array<float, batch_size * m> input{
         0.2f, -0.3f, 0.5f, 0.7f,
         -0.4f, 0.1f, 0.8f, -0.2f,
-    };
-    auto batched_prefix = sequential_prefix;
-    for (int token = 0; token < 2; ++token) {
-        sequential_block.Forward(
-            sequential_prefix.data() + token * 4, token, 0, token, token + 1,
-            sequential_state);
-        batched_block.Forward(
-            batched_prefix.data() + token * 4, token, 0, token, token + 1,
-            batched_state);
-    }
-
-    std::array<float, 12> sequential{
-        0.6f, 0.2f, -0.5f, 0.3f,
-        -0.7f, 0.4f, 0.1f, 0.9f,
         0.3f, -0.8f, 0.6f, -0.1f,
     };
-    auto batched = sequential;
+    const auto weights = MakeValues(n * m, 0.07f);
+    std::array<float, batch_size * n> batched{};
+    std::array<float, batch_size * n> sequential{};
 
-    batched_block.ForwardPrefill(batched.data(), 3, 2, batched_state);
-    for (int token = 0; token < 3; ++token) {
-        const auto position = token + 2;
-        sequential_block.Forward(
-            sequential.data() + token * 4,
-            position,
-            0,
-            position,
-            position + 1,
-            sequential_state
+    matmul_cpu(
+        batched.data(), input.data(), weights.data(), n, m, batch_size
+    );
+    for (int batch = 0; batch < batch_size; ++batch) {
+        matmul_cpu(
+            sequential.data() + batch * n,
+            input.data() + batch * m,
+            weights.data(),
+            n,
+            m
         );
     }
 
     for (size_t i = 0; i < batched.size(); ++i) {
         if (std::abs(batched[i] - sequential[i]) > 1e-5f) {
             throw std::runtime_error(
-                "batched prefill differs from sequential forward at element " +
-                std::to_string(i));
+                "batched matmul differs from sequential matmul at element " +
+                std::to_string(i)
+            );
         }
     }
+}
 
-    const auto& batched_cache = batched_block.GetCache();
-    const auto& sequential_cache = sequential_block.GetCache();
-    for (size_t i = 0; i < 10; ++i) {
-        if (batched_cache.k_[i] != sequential_cache.k_[i] ||
-            batched_cache.v_[i] != sequential_cache.v_[i]) {
-            throw std::runtime_error("batched prefill populated an incorrect KV cache");
-        }
-    }
+void TestBlockMoveTransfersCacheOwnership() {
+    const std::string config_json =
+        R"({"act_type":"silu","arch":"Qwen3ForCausalLM","attention_bias":false,"bos_token_id":1,"dim":4,"dtype":"bf16","eos_token_id":2,"head_dim":2,"hidden_dim":6,"max_seq_len":8,"n_heads":2,"n_kv_heads":1,"n_layers":1,"norm_eps":0.000001,"qk_norm":true,"rope_theta":10000.0,"rotary_dim":2,"tie_word_embeddings":true,"vocab_size":16})";
+    Config config(config_json);
+    Block source(&config, Device::CPU);
+    source.ResetCache();
+
+    Block moved(std::move(source));
+    moved.ResetCache();
+
+    Block assigned(&config, Device::CPU);
+    assigned = std::move(moved);
+    assigned.ResetCache();
 }
 
 void TestConfigParsing() {
@@ -162,7 +143,8 @@ void TestTokenizer() {
 int main() {
     try {
         TestConfigParsing();
-        TestBatchedPrefillMatchesSequentialForward();
+        TestBatchedMatmulMatchesSequentialMatmul();
+        TestBlockMoveTransfersCacheOwnership();
         TestGreedySampler();
         TestTemperatureSampler();
         TestTokenizer();

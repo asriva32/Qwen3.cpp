@@ -84,12 +84,15 @@ private:
     std::shared_ptr<Config> inference_config_;
     int model_max_seq_len_ = 0;
     std::vector<Block> blocks_;
-    std::vector<std::bfloat16_t> embedding_;
-    std::vector<std::bfloat16_t> final_norm_;
-    std::vector<std::bfloat16_t> output_;
-    std::vector<float> hidden_state_;
-    std::vector<float> normalized_state_;
-    std::vector<float> logits_;
+    // branch on gpu
+    using bf16 = std::bfloat16_t;
+    // not implementing destructor since if model out of scope that basically means program end
+    WeightTensor embedding_;
+    WeightTensor final_norm_;
+    WeightTensor output_;
+    float* hidden_state_;
+    float* normalized_state_;
+    float* logits_;
     Device device;
 };
 

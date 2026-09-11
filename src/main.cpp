@@ -18,17 +18,17 @@
 namespace {
 
 struct Options {
-    std::string model_path;
     std::vector<std::int32_t> tokens;
     std::optional<std::string> prompt;
-    int context_length = 512;
-    std::size_t max_tokens = 128;
-    float temperature = Sampler::kDefaultTemperature;
     std::optional<std::uint64_t> seed;
+    std::string model_path;
+    std::string device;
+    std::size_t max_tokens = 128;
+    int context_length = 512;
+    float temperature = Sampler::kDefaultTemperature;
     int threads = 0;
     bool stop_on_eos = true;
     bool raw_prompt = false;
-    std::string device;
 };
 
 void PrintUsage(std::ostream& out) {
@@ -135,6 +135,10 @@ Options ParseOptions(int argc, char** argv) {
     if (options.threads < 0) {
         throw std::invalid_argument("--threads must not be negative");
     }
+
+    if (options.device != "cpu" || options.device != "gpu") {
+        throw std::invalid_argument("--device must be either cpu or gpu");
+    }
     return options;
 }
 
@@ -146,8 +150,7 @@ int main(int argc, char** argv) {
         if (options.threads > 0) {
             omp_set_num_threads(options.threads);
         }
-
-        Model model(options.model_path, options.context_length, (options.device == "cpu" ? Device::CPU : Device::GPU));
+        Model model(options.model_path, options.context_length, (options.device == "gpu" ? Device::GPU : Device::CPU));
         const Tokenizer tokenizer(model);
         const auto prompt_tokens = options.prompt
             ? tokenizer.Encode(

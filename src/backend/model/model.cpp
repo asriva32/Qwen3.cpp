@@ -12,23 +12,47 @@ auto Model::GetTensorIndex() const noexcept
     return tensors_;
 }
 
+std::bfloat16_t* CopyTensorData(std::bfloat16_t *a, size_t size) {
+    std::bfloat16_t* out = new std::bfloat16_t[size];
+    memcpy(out, a, size * sizeof(std::bfloat16_t));
+    return out;
+}
+
+// can improve this later
+void BuildWeightTensor(WeightTensor& weights, std::vector<std::bfloat16_t>& from, Device device) {
+    weights.size = from.size();
+    weights.data = CopyTensorData(from.data(), weights.size);
+    if (device == Device::GPU) {
+        weights.data = static_cast<std::bfloat16_t*>(upload_cuda(weights.data, weights.size * sizeof(std::bfloat16_t)));
+    } 
+}
+
+void BuildDeviceArray(float*& a, size_t size, Device device) {
+    if (device == Device::GPU) {
+        a = static_cast<float*>(allocate_cuda_zeroed(size * sizeof(float)));
+    } else {
+        a = new float[size];
+    }
+}
+
 auto Model::InitializeInference(int context_length) -> void {
     auto& config = GetInferenceConfig();
     config.max_seq_len = context_length;
     using bf16 = std::bfloat16_t;
 
-    embedding_  = LoadTensorData<bf16>("model.embed.weight");
-    final_norm_ = LoadTensorData<bf16>("model.norm.weight");
-    if (config.tie_word_embeddings) {
-        output_.clear();
-    } else {
-        output_ = LoadTensorData<bf16>("model.output.weight");
-    }
+    auto embedding  = LoadTensorData<bf16>("model.embed.weight");
+    auto final_norm = LoadTensorData<bf16>("model.norm.weight");
+    auto output = LoadTensorData<bf16>("model.output.weight");
+    BuildWeightTensor(embedding_, embedding, device);
+    BuildWeightTensor(final_norm_, final_norm, device);
+    BuildWeightTensor(output_, output, device);
+
+    
 
     const auto dim = static_cast<size_t>(config.dim);
     const auto vocab_size = static_cast<size_t>(config.vocab_size);
-    if (embedding_.size() != vocab_size * dim || final_norm_.size() != dim ||
-        (!config.tie_word_embeddings && output_.size() != vocab_size * dim)) {
+    if (embedding_.size != vocab_size * dim || final_norm_.size != dim ||
+        (!config.tie_word_embeddings && output_.size != vocab_size * dim)) {
         throw std::runtime_error("Invalid embedding, final norm, or output tensor shape");
     }
 
@@ -36,19 +60,31 @@ auto Model::InitializeInference(int context_length) -> void {
     blocks_.reserve(config.n_layers);
     for (auto layer{0}; layer < config.n_layers; ++layer) {
         const std::string prefix = "model.layers." + std::to_string(layer);
-        BlockWeights weights;
-        weights.attn_norm = LoadTensorData<bf16>(prefix + ".attn.norm.weight");
-        weights.q_norm    = LoadTensorData<bf16>(prefix + ".attn.q_norm.weight");
-        weights.k_norm    = LoadTensorData<bf16>(prefix + ".attn.k_norm.weight");
-        weights.wq        = LoadTensorData<bf16>(prefix + ".attn.wq.weight");
-        weights.wk        = LoadTensorData<bf16>(prefix + ".attn.wk.weight");
-        weights.wv        = LoadTensorData<bf16>(prefix + ".attn.wv.weight");
-        weights.wo        = LoadTensorData<bf16>(prefix + ".attn.wo.weight");
-        weights.mlp_norm  = LoadTensorData<bf16>(prefix + ".mlp.norm.weight");
-        weights.w1        = LoadTensorData<bf16>(prefix + ".mlp.w1.weight");
-        weights.w2        = LoadTensorData<bf16>(prefix + ".mlp.w2.weight");
-        weights.w3        = LoadTensorData<bf16>(prefix + ".mlp.w3.weight");
-        blocks_.emplace_back(&GetInferenceConfig(), std::move(weights));
+        Block block(&GetInferenceConfig(), device);
+        auto attn_norm = LoadTensorData<bf16>(prefix + ".attn.norm.weight");
+        auto q_norm    = LoadTensorData<bf16>(prefix + ".attn.q_norm.weight");
+        auto k_norm    = LoadTensorData<bf16>(prefix + ".attn.k_norm.weight");
+        auto wq        = LoadTensorData<bf16>(prefix + ".attn.wq.weight");
+        auto wk        = LoadTensorData<bf16>(prefix + ".attn.wk.weight");
+        auto wv        = LoadTensorData<bf16>(prefix + ".attn.wv.weight");
+        auto wo        = LoadTensorData<bf16>(prefix + ".attn.wo.weight");
+        auto mlp_norm  = LoadTensorData<bf16>(prefix + ".mlp.norm.weight");
+        auto w1        = LoadTensorData<bf16>(prefix + ".mlp.w1.weight");
+        auto w2        = LoadTensorData<bf16>(prefix + ".mlp.w2.weight");
+        auto w3        = LoadTensorData<bf16>(prefix + ".mlp.w3.weight");
+
+        BuildWeightTensor(block.attn_norm_, attn_norm, device);
+        BuildWeightTensor(block.q_norm_, q_norm, device);
+        BuildWeightTensor(block.k_norm_, k_norm, device);
+        BuildWeightTensor(block.wq_, wq, device);
+        BuildWeightTensor(block.wk_, wk, device);
+        BuildWeightTensor(block.wv_, wv, device);
+        BuildWeightTensor(block.wo_, wo, device);
+        BuildWeightTensor(block.mlp_norm_, mlp_norm, device);
+        BuildWeightTensor(block.w1_, w1, device);
+        BuildWeightTensor(block.w2_, w2, device);
+        BuildWeightTensor(block.w3_, w3, device);
+        blocks_.emplace_back(std::move(block));
     }
 
     for (const auto& block : blocks_) {
@@ -59,18 +95,23 @@ auto Model::InitializeInference(int context_length) -> void {
         kPrefillBatchSize,
         static_cast<size_t>(config.max_seq_len)
     );
-    hidden_state_.resize(prefill_capacity * dim);
-    normalized_state_.resize(prefill_capacity * dim);
-    logits_.resize(config.vocab_size);
+    BuildDeviceArray(hidden_state_, prefill_capacity * dim, device);
+    BuildDeviceArray(normalized_state_, prefill_capacity * dim, device);
+    BuildDeviceArray(logits_, config.vocab_size, device);
 }
 
 auto Model::ResetInference() -> void {
     for (Block& block : blocks_) {
         block.ResetCache();
     }
-    std::fill(hidden_state_.begin(), hidden_state_.end(), 0.0f);
-    std::fill(normalized_state_.begin(), normalized_state_.end(), 0.0f);
-    std::fill(logits_.begin(), logits_.end(), 0.0f);
+    auto& config = GetInferenceConfig();
+    const auto prefill_capacity = std::min(
+        kPrefillBatchSize,
+        static_cast<size_t>(config.max_seq_len)
+    );
+    std::fill_n(hidden_state_, prefill_capacity * config.dim, 0.0f);
+    std::fill_n(normalized_state_, prefill_capacity * config.dim, 0.0f);
+    std::fill_n(logits_, config.vocab_size, 0.0f);
 }
 
 auto Model::ForwardTokenGPU(std::int32_t token, int pos, State& state) -> void {
@@ -83,8 +124,8 @@ auto Model::ForwardTokenGPU(std::int32_t token, int pos, State& state) -> void {
     }
 
     const auto* embedding_row =
-        embedding_.data() + static_cast<size_t>(token) * config.dim;
-    std::copy_n(embedding_row, config.dim, hidden_state_.begin());
+        embedding_.data + static_cast<size_t>(token) * config.dim;
+    std::copy_n(embedding_row, config.dim, hidden_state_);
 
     constexpr int kAttentionSinks = 4;
     const auto context_length = config.max_seq_len;
@@ -97,22 +138,22 @@ auto Model::ForwardTokenGPU(std::int32_t token, int pos, State& state) -> void {
     const auto kv_len = std::min(pos + 1, context_length);
 
     for (Block& block : blocks_) {
-        block.Forward(hidden_state_.data(), pos, num_sink, kv_pos, kv_len, state);
+        block.Forward(hidden_state_, pos, num_sink, kv_pos, kv_len, state);
     }
 
     rmsnorm_cpu(
-        normalized_state_.data(),
-        hidden_state_.data(),
-        final_norm_.data(),
+        normalized_state_,
+        hidden_state_,
+        final_norm_.data,
         config.norm_eps,
         config.dim
     );
     const auto classifier = config.tie_word_embeddings
-        ? embedding_.data()
-        : output_.data();
-    matmul_cpu(
-        logits_.data(),
-        normalized_state_.data(),
+        ? embedding_.data
+        : output_.data;
+    matmul_gpu(
+        logits_,
+        normalized_state_,
         classifier,
         config.vocab_size,
         config.dim
@@ -129,8 +170,8 @@ auto Model::ForwardTokenCPU(std::int32_t token, int pos, State& state) -> void {
     }
 
     const auto* embedding_row =
-        embedding_.data() + static_cast<size_t>(token) * config.dim;
-    std::copy_n(embedding_row, config.dim, hidden_state_.begin());
+        embedding_.data + static_cast<size_t>(token) * config.dim;
+    std::copy_n(embedding_row, config.dim, hidden_state_);
 
     constexpr int kAttentionSinks = 4;
     const auto context_length = config.max_seq_len;
@@ -143,22 +184,22 @@ auto Model::ForwardTokenCPU(std::int32_t token, int pos, State& state) -> void {
     const auto kv_len = std::min(pos + 1, context_length);
 
     for (Block& block : blocks_) {
-        block.Forward(hidden_state_.data(), pos, num_sink, kv_pos, kv_len, state);
+        block.Forward(hidden_state_, pos, num_sink, kv_pos, kv_len, state);
     }
 
     rmsnorm_cpu(
-        normalized_state_.data(),
-        hidden_state_.data(),
-        final_norm_.data(),
+        normalized_state_,
+        hidden_state_,
+        final_norm_.data,
         config.norm_eps,
         config.dim
     );
     const auto classifier = config.tie_word_embeddings
-        ? embedding_.data()
-        : output_.data();
+        ? embedding_.data
+        : output_.data;
     matmul_cpu(
-        logits_.data(),
-        normalized_state_.data(),
+        logits_,
+        normalized_state_,
         classifier,
         config.vocab_size,
         config.dim
@@ -185,10 +226,10 @@ auto Model::PrefillGPU(
     if (start > context_length || num_tokens > context_length - start) {
         throw std::out_of_range("Prefill chunk exceeds maximum context length");
     }
-    if (num_tokens > state.batch_capacity ||
-        num_tokens > hidden_state_.size() / static_cast<size_t>(config.dim)) {
-        throw std::length_error("Prefill chunk exceeds CPU batch capacity");
-    }
+    // if (num_tokens > state.batch_capacity ||
+    //     num_tokens > hidden_state_.size() / static_cast<size_t>(config.dim)) {
+    //     throw std::length_error("Prefill chunk exceeds CPU batch capacity");
+    // }
 
     for (auto t{0uz}; t < num_tokens; ++t) {
         const auto token = tokens[t];
@@ -196,31 +237,31 @@ auto Model::PrefillGPU(
             throw std::out_of_range("Token id is outside the vocabulary");
         }
         const auto* embedding_row =
-            embedding_.data() + static_cast<size_t>(token) * config.dim;
+            embedding_.data + static_cast<size_t>(token) * config.dim;
         auto* destination =
-            hidden_state_.data() + static_cast<size_t>(t) * config.dim;
+            hidden_state_ + static_cast<size_t>(t) * config.dim;
         std::copy_n(embedding_row, config.dim, destination);
     }
 
     for (Block& block : blocks_) {
-        block.ForwardPrefill(hidden_state_.data(), num_tokens, pos, state);
+        block.ForwardPrefillGPU(hidden_state_, num_tokens, pos, state);
     }
 
     rmsnorm_cpu(
-        normalized_state_.data(),
-        hidden_state_.data(),
-        final_norm_.data(),
+        normalized_state_,
+        hidden_state_,
+        final_norm_.data,
         config.norm_eps,
         config.dim,
         static_cast<int>(num_tokens)
     );
     const auto classifier = config.tie_word_embeddings
-        ? embedding_.data()
-        : output_.data();
+        ? embedding_.data
+        : output_.data;
     const auto* last_hidden =
-        normalized_state_.data() + static_cast<size_t>(num_tokens - 1) * config.dim;
-    matmul_cpu(
-        logits_.data(),
+        normalized_state_ + static_cast<size_t>(num_tokens - 1) * config.dim;
+    matmul_gpu(
+        logits_,
         last_hidden,
         classifier,
         config.vocab_size,
@@ -248,10 +289,10 @@ auto Model::PrefillCPU(
     if (start > context_length || num_tokens > context_length - start) {
         throw std::out_of_range("Prefill chunk exceeds maximum context length");
     }
-    if (num_tokens > state.batch_capacity ||
-        num_tokens > hidden_state_.size() / static_cast<size_t>(config.dim)) {
-        throw std::length_error("Prefill chunk exceeds CPU batch capacity");
-    }
+    // if (num_tokens > state.batch_capacity ||
+    //     num_tokens > hidden_state_.size() / static_cast<size_t>(config.dim)) {
+    //     throw std::length_error("Prefill chunk exceeds CPU batch capacity");
+    // }
 
     for (auto t{0uz}; t < num_tokens; ++t) {
         const auto token = tokens[t];
@@ -259,31 +300,31 @@ auto Model::PrefillCPU(
             throw std::out_of_range("Token id is outside the vocabulary");
         }
         const auto* embedding_row =
-            embedding_.data() + static_cast<size_t>(token) * config.dim;
+            embedding_.data + static_cast<size_t>(token) * config.dim;
         auto* destination =
-            hidden_state_.data() + static_cast<size_t>(t) * config.dim;
+            hidden_state_ + static_cast<size_t>(t) * config.dim;
         std::copy_n(embedding_row, config.dim, destination);
     }
 
     for (Block& block : blocks_) {
-        block.ForwardPrefill(hidden_state_.data(), num_tokens, pos, state);
+        block.ForwardPrefillCPU(hidden_state_, num_tokens, pos, state);
     }
 
     rmsnorm_cpu(
-        normalized_state_.data(),
-        hidden_state_.data(),
-        final_norm_.data(),
+        normalized_state_,
+        hidden_state_,
+        final_norm_.data,
         config.norm_eps,
         config.dim,
         static_cast<int>(num_tokens)
     );
     const auto classifier = config.tie_word_embeddings
-        ? embedding_.data()
-        : output_.data();
+        ? embedding_.data
+        : output_.data;
     const auto* last_hidden =
-        normalized_state_.data() + static_cast<size_t>(num_tokens - 1) * config.dim;
+        normalized_state_ + static_cast<size_t>(num_tokens - 1) * config.dim;
     matmul_cpu(
-        logits_.data(),
+        logits_,
         last_hidden,
         classifier,
         config.vocab_size,
@@ -332,7 +373,7 @@ auto Model::Generate(
     Sampler sampler(temperature, seed);
     auto pos = static_cast<int>(prompt_tokens.size());
     while (result.tokens.size() < max_generated_tokens) {
-        const auto token = sampler.Sample(logits_);
+        const auto token = sampler.Sample(std::span<const float>(logits_, config.vocab_size));
         if (stop_on_eos && token == config.eos_token_id) {
             result.stats.stopped_on_eos = true;
             break;

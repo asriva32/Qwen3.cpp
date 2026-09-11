@@ -1,5 +1,7 @@
 #include <immintrin.h>
+#include <algorithm>
 #include <cmath>
+#include <memory>
 #include "layers.h"
 
 static auto RmsNormHelper(
@@ -11,18 +13,124 @@ static auto RmsNormHelper(
 ) -> void;
 
 // Transformer Block
-Block::Block(Config* config) : config(config) {
-    cache = KVCache(config->max_seq_len, config->n_kv_heads, config->head_dim);
+Block::Block(Config* config, Device device) : config(config), device_(device) {
+    if (config == nullptr) {
+        throw std::invalid_argument("Block config must not be null");
+    }
+
+    const size_t cache_elements =
+        static_cast<size_t>(config->max_seq_len) *
+        static_cast<size_t>(config->n_kv_heads) *
+        static_cast<size_t>(config->head_dim);
+
+    if (device_ == Device::CPU) {
+        k_ = new std::bfloat16_t[cache_elements];
+        v_ = new std::bfloat16_t[cache_elements];
+    } else {
+        const size_t cache_bytes = cache_elements * sizeof(std::bfloat16_t);
+        k_ = static_cast<std::bfloat16_t*>(allocate_cuda_zeroed(cache_bytes));
+        v_ = static_cast<std::bfloat16_t*>(allocate_cuda_zeroed(cache_bytes));
+    }
 }
 
-Block::Block(Config* config, BlockWeights weights)
-    : Block(config) {
-    this->weights = std::move(weights);
+Block::~Block() {
+    Release();
+}
+
+Block::Block(Block&& other) noexcept {
+    TakeOwnership(other);
+}
+
+auto Block::operator=(Block&& other) noexcept -> Block& {
+    if (this != &other) {
+        Release();
+        TakeOwnership(other);
+    }
+    return *this;
+}
+
+auto Block::Release() noexcept -> void {
+    const auto release = [this](auto*& pointer) {
+        if (device_ == Device::CPU) {
+            delete[] pointer;
+        } else {
+            free_cuda(pointer);
+        }
+        pointer = nullptr;
+    };
+
+    release(k_);
+    release(v_);
+    release(attn_norm_.data);
+    release(q_norm_.data);
+    release(k_norm_.data);
+    release(wq_.data);
+    release(wk_.data);
+    release(wv_.data);
+    release(wo_.data);
+    release(mlp_norm_.data);
+    release(w1_.data);
+    release(w2_.data);
+    release(w3_.data);
+
+    attn_norm_.size = 0;
+    q_norm_.size = 0;
+    k_norm_.size = 0;
+    wq_.size = 0;
+    wk_.size = 0;
+    wv_.size = 0;
+    wo_.size = 0;
+    mlp_norm_.size = 0;
+    w1_.size = 0;
+    w2_.size = 0;
+    w3_.size = 0;
+    config = nullptr;
+}
+
+auto Block::TakeOwnership(Block& other) noexcept -> void {
+    const auto take = [](auto*& destination, auto*& source) {
+        destination = source;
+        source = nullptr;
+    };
+    const auto take_weight = [&take](WeightTensor& destination,
+                                     WeightTensor& source) {
+        destination = source;
+        source = {};
+    };
+
+    take(k_, other.k_);
+    take(v_, other.v_);
+    take_weight(attn_norm_, other.attn_norm_);
+    take_weight(q_norm_, other.q_norm_);
+    take_weight(k_norm_, other.k_norm_);
+    take_weight(wq_, other.wq_);
+    take_weight(wk_, other.wk_);
+    take_weight(wv_, other.wv_);
+    take_weight(wo_, other.wo_);
+    take_weight(mlp_norm_, other.mlp_norm_);
+    take_weight(w1_, other.w1_);
+    take_weight(w2_, other.w2_);
+    take_weight(w3_, other.w3_);
+    config = other.config;
+    other.config = nullptr;
+    device_ = other.device_;
 }
 
 auto Block::ResetCache() -> void {
-    std::fill(cache.k_.begin(), cache.k_.end(), 0.0f);
-    std::fill(cache.v_.begin(), cache.v_.end(), 0.0f);
+    const size_t cache_elements =
+        static_cast<size_t>(config->max_seq_len) *
+        static_cast<size_t>(config->n_kv_heads) *
+        static_cast<size_t>(config->head_dim);
+
+    if (device_ == Device::CPU) {
+        std::fill_n(k_, cache_elements, std::bfloat16_t{});
+        std::fill_n(v_, cache_elements, std::bfloat16_t{});
+    } else {
+        const size_t cache_bytes =
+            cache_elements * sizeof(std::bfloat16_t);
+        zero_cuda(k_, cache_bytes);
+        zero_cuda(v_, cache_bytes);
+    }
 }
 
 auto Block::ValidateWeights() const -> void {
@@ -32,30 +140,29 @@ auto Block::ValidateWeights() const -> void {
     const auto q_dim = static_cast<size_t>(config->n_heads) * head_dim;
     const auto kv_dim = static_cast<size_t>(config->n_kv_heads) * head_dim;
 
-    const auto require_size = [](const std::vector<std::bfloat16_t>& weight, size_t expected,
+    const auto require_size = [](const WeightTensor& weight, size_t expected,
                                  const char* name) {
-        if (weight.size() != expected) {
+        if (weight.size != expected) {
             throw std::invalid_argument(
                 std::string("Invalid ") + name + " size: expected " +
-                std::to_string(expected) + ", got " + std::to_string(weight.size()));
+                std::to_string(expected) + ", got " + std::to_string(weight.size));
         }
     };
 
-    require_size(weights.attn_norm, dim, "attn_norm");
-    require_size(weights.q_norm, head_dim, "q_norm");
-    require_size(weights.k_norm, head_dim, "k_norm");
-    require_size(weights.wq, q_dim * dim, "wq");
-    require_size(weights.wk, kv_dim * dim, "wk");
-    require_size(weights.wv, kv_dim * dim, "wv");
-    require_size(weights.wo, dim * q_dim, "wo");
-    require_size(weights.mlp_norm, dim, "mlp_norm");
-    require_size(weights.w1, hidden_dim * dim, "w1");
-    require_size(weights.w2, dim * hidden_dim, "w2");
-    require_size(weights.w3, hidden_dim * dim, "w3");
+    require_size(attn_norm_, dim, "attn_norm");
+    require_size(q_norm_, head_dim, "q_norm");
+    require_size(k_norm_, head_dim, "k_norm");
+    require_size(wq_, q_dim * dim, "wq");
+    require_size(wk_, kv_dim * dim, "wk");
+    require_size(wv_, kv_dim * dim, "wv");
+    require_size(wo_, dim * q_dim, "wo");
+    require_size(mlp_norm_, dim, "mlp_norm");
+    require_size(w1_, hidden_dim * dim, "w1");
+    require_size(w2_, dim * hidden_dim, "w2");
+    require_size(w3_, hidden_dim * dim, "w3");
 }
 
-// ForwardPrefill
-auto Block::ForwardPrefill(
+auto Block::ForwardPrefillGPU(
     float *x,
     size_t num_tokens,
     int pos,
@@ -96,34 +203,34 @@ auto Block::ForwardPrefill(
     rmsnorm_cpu(
         norm_buffer,
         x,
-        weights.attn_norm.data(),
+        attn_norm_.data,
         config->norm_eps,
         config->dim,
         batch_size
     );
 
     // Batched Q/K/V projections over row-major token inputs.
-    matmul_cpu(
+    matmul_gpu(
         q,
         norm_buffer,
-        weights.wq.data(),
+        wq_.data,
         q_dim,
         config->dim,
         batch_size
     );
-    matmul_cpu(
+    matmul_gpu(
         k,
         norm_buffer,
-        weights.wk.data(),
+        wk_.data,
         kv_dim,
         config->dim,
         batch_size
     );
 
-    matmul_cpu(
+    matmul_gpu(
         v,
         norm_buffer,
-        weights.wv.data(),
+        wv_.data,
         kv_dim,
         config->dim,
         batch_size
@@ -134,7 +241,7 @@ auto Block::ForwardPrefill(
     for (size_t t = 0; t < num_tokens; ++t) {
         for (int head = 0; head < config->n_heads; ++head) {
             auto* q_head = q + t * q_dim + head * config->head_dim;
-            rmsnorm_cpu(q_head, q_head, weights.q_norm.data(), config->norm_eps,
+            rmsnorm_cpu(q_head, q_head, q_norm_.data, config->norm_eps,
                     config->head_dim);
         }
     }
@@ -143,7 +250,7 @@ auto Block::ForwardPrefill(
     for (size_t t = 0; t < num_tokens; ++t) {
         for (int head = 0; head < config->n_kv_heads; ++head) {
             auto* k_head = k + t * kv_dim + head * config->head_dim;
-            rmsnorm_cpu(k_head, k_head, weights.k_norm.data(), config->norm_eps,
+            rmsnorm_cpu(k_head, k_head, k_norm_.data, config->norm_eps,
                     config->head_dim);
         }
     }
@@ -179,8 +286,8 @@ auto Block::ForwardPrefill(
         const auto kv_pos = start + t;
         const float* k_token = k + t * kv_dim;
         const float* v_token = v + t * kv_dim;
-        auto* cache_k = cache.k_.data() + kv_pos * kv_dim;
-        auto* cache_v = cache.v_.data() + kv_pos * kv_dim;
+        auto* cache_k = k_ + kv_pos * kv_dim;
+        auto* cache_v = v_ + kv_pos * kv_dim;
 
         for (int i = 0; i < kv_dim; ++i) {
             cache_k[i] = static_cast<std::bfloat16_t>(k_token[i]);
@@ -203,8 +310,8 @@ auto Block::ForwardPrefill(
                 attn_output + t * q_dim + head * config->head_dim,
                 attn_scores + (t * config->n_heads + head) * config->max_seq_len,
                 q + t * q_dim + head * config->head_dim,
-                cache.k_.data() + kv_head * config->head_dim,
-                cache.v_.data() + kv_head * config->head_dim,
+                k_ + kv_head * config->head_dim,
+                v_ + kv_head * config->head_dim,
                 config->head_dim,
                 config->n_kv_heads,
                 kv_len
@@ -214,10 +321,10 @@ auto Block::ForwardPrefill(
 
     // output projection
 
-    matmul_cpu(
+    matmul_gpu(
         projected,
         attn_output,
-        weights.wo.data(),
+        wo_.data,
         config->dim,
         q_dim,
         batch_size
@@ -236,7 +343,7 @@ auto Block::ForwardPrefill(
     rmsnorm_cpu(
         norm_buffer,
         x,
-        weights.mlp_norm.data(),
+        mlp_norm_.data,
         config->norm_eps,
         config->dim,
         batch_size
@@ -249,9 +356,221 @@ auto Block::ForwardPrefill(
         state.lin1,
         state.lin2,
         norm_buffer,
-        weights.w1.data(),
-        weights.w2.data(),
-        weights.w3.data(),
+        w1_.data,
+        w2_.data,
+        w3_.data,
+        config->hidden_dim,
+        config->dim,
+        batch_size
+    );
+
+    // Final residual
+    #pragma omp parallel for collapse(2)
+    for (size_t t = 0; t < num_tokens; ++t) {
+        for (int i = 0; i < config->dim; ++i) {
+            x[t * config->dim + i] += projected[t * config->dim + i];
+        }
+    }
+}
+
+// ForwardPrefill
+auto Block::ForwardPrefillCPU(
+    float *x,
+    size_t num_tokens,
+    int pos,
+    State &state
+) -> void 
+{
+    if (!x) {
+        throw std::invalid_argument("Block input must not be null");
+    }
+    if (num_tokens == 0) {
+        throw std::invalid_argument("Prefill requires at least one token");
+    }
+    if (pos < 0) {
+        throw std::out_of_range("Token position must not be negative");
+    }
+    const auto start = static_cast<size_t>(pos);
+    const auto context_length = static_cast<size_t>(config->max_seq_len);
+    if (start > context_length || num_tokens > context_length - start) {
+        throw std::out_of_range("Prefill chunk exceeds maximum context length");
+    }
+    if (num_tokens > state.batch_capacity) {
+        throw std::length_error("Prefill chunk exceeds CPU batch capacity");
+    }
+    const auto batch_size = static_cast<int>(num_tokens);
+    // x is [num_tokens, dim]
+    // norm_buffer is [num_tokens, dim]
+    auto& q = state.q;
+    auto& k = state.k;
+    auto& v = state.v;
+    auto& norm_buffer = state.norm_buffer;
+    auto& attn_scores = state.attn_scores;
+    auto& attn_output = state.attn_output;
+    auto& projected = state.projected;
+
+    const auto q_dim = config->n_heads * config->head_dim;
+    const auto kv_dim = config->n_kv_heads * config->head_dim;
+
+    rmsnorm_cpu(
+        norm_buffer,
+        x,
+        attn_norm_.data,
+        config->norm_eps,
+        config->dim,
+        batch_size
+    );
+
+    // Batched Q/K/V projections over row-major token inputs.
+    matmul_cpu(
+        q,
+        norm_buffer,
+        wq_.data,
+        q_dim,
+        config->dim,
+        batch_size
+    );
+    matmul_cpu(
+        k,
+        norm_buffer,
+        wk_.data,
+        kv_dim,
+        config->dim,
+        batch_size
+    );
+
+    matmul_cpu(
+        v,
+        norm_buffer,
+        wv_.data,
+        kv_dim,
+        config->dim,
+        batch_size
+    );
+
+    // Q/K norm
+    #pragma omp parallel for collapse(2)
+    for (size_t t = 0; t < num_tokens; ++t) {
+        for (int head = 0; head < config->n_heads; ++head) {
+            auto* q_head = q + t * q_dim + head * config->head_dim;
+            rmsnorm_cpu(q_head, q_head, q_norm_.data, config->norm_eps,
+                    config->head_dim);
+        }
+    }
+
+    #pragma omp parallel for collapse(2)
+    for (size_t t = 0; t < num_tokens; ++t) {
+        for (int head = 0; head < config->n_kv_heads; ++head) {
+            auto* k_head = k + t * kv_dim + head * config->head_dim;
+            rmsnorm_cpu(k_head, k_head, k_norm_.data, config->norm_eps,
+                    config->head_dim);
+        }
+    }
+
+    // Rope
+
+    #pragma omp parallel for
+    for (size_t t = 0; t < num_tokens; ++t) {
+        const auto token_pos = pos + static_cast<int>(t);
+
+        rope_cpu(
+            q + t * q_dim,
+            q_dim,
+            config->head_dim,
+            token_pos,
+            config->rope_theta,
+            config->rotary_dim
+        );
+
+        rope_cpu(
+            k + t * kv_dim,
+            kv_dim,
+            config->head_dim,
+            token_pos,
+            config->rope_theta,
+            config->rotary_dim
+        );
+    }
+
+    // Prefill is bounded by the context length, so cache positions are contiguous.
+    #pragma omp parallel for
+    for (size_t t = 0; t < num_tokens; ++t) {
+        const auto kv_pos = start + t;
+        const float* k_token = k + t * kv_dim;
+        const float* v_token = v + t * kv_dim;
+        auto* cache_k = k_ + kv_pos * kv_dim;
+        auto* cache_v = v_ + kv_pos * kv_dim;
+
+        for (int i = 0; i < kv_dim; ++i) {
+            cache_k[i] = static_cast<std::bfloat16_t>(k_token[i]);
+            cache_v[i] = static_cast<std::bfloat16_t>(v_token[i]);
+        }
+    }
+
+    // Each query attends only through its own position, preserving causality even
+    // though the complete chunk has already been written to the KV cache.
+
+    const int queries_per_kv_head = config->n_heads / config->n_kv_heads;
+
+    #pragma omp parallel for collapse(2)
+    for (size_t t = 0; t < num_tokens; ++t) {
+        for (int head = 0; head < config->n_heads; ++head) {
+            const int kv_head = head / queries_per_kv_head;
+
+            const auto kv_len = pos + static_cast<int>(t) + 1;
+            attn_cpu(
+                attn_output + t * q_dim + head * config->head_dim,
+                attn_scores + (t * config->n_heads + head) * config->max_seq_len,
+                q + t * q_dim + head * config->head_dim,
+                k_ + kv_head * config->head_dim,
+                v_ + kv_head * config->head_dim,
+                config->head_dim,
+                config->n_kv_heads,
+                kv_len
+            );
+        }
+    }
+
+    // output projection
+
+    matmul_cpu(
+        projected,
+        attn_output,
+        wo_.data,
+        config->dim,
+        q_dim,
+        batch_size
+    );
+
+    // Residual
+    #pragma omp parallel for collapse(2)
+    for (size_t t = 0; t < num_tokens; ++t) {
+        for (int i = 0; i < config->dim; ++i) {
+            x[t * config->dim + i] += projected[t * config->dim + i];
+        }
+    }
+
+    // MLP
+
+    rmsnorm_cpu(
+        norm_buffer,
+        x,
+        mlp_norm_.data,
+        config->norm_eps,
+        config->dim,
+        batch_size
+    );
+
+    
+    // batched ffn
+    ffn_cpu(
+        projected,
+        state.lin1,
+        state.lin2,
+        norm_buffer,
+        w1_.data,
+        w2_.data,
+        w3_.data,
         config->hidden_dim,
         config->dim,
         batch_size
@@ -289,37 +608,37 @@ auto Block::Forward(
     const auto q_dim = config->n_heads * config->head_dim;
     const auto kv_dim = config->n_kv_heads * config->head_dim;
 
-    rmsnorm_cpu(norm_buffer, x, weights.attn_norm.data() , config->norm_eps, config->dim);
-    matmul_cpu(q, norm_buffer, weights.wq.data(), q_dim, config->dim);
-    matmul_cpu(k, norm_buffer, weights.wk.data(), kv_dim, config->dim);
-    matmul_cpu(v, norm_buffer, weights.wv.data(), kv_dim, config->dim);
+    rmsnorm_cpu(norm_buffer, x, attn_norm_.data , config->norm_eps, config->dim);
+    matmul_cpu(q, norm_buffer, wq_.data, q_dim, config->dim);
+    matmul_cpu(k, norm_buffer, wk_.data, kv_dim, config->dim);
+    matmul_cpu(v, norm_buffer, wv_.data, kv_dim, config->dim);
     
     for (auto head = 0; head < config->n_heads; ++head) {
         auto* q_head = q + head * config->head_dim;
-        rmsnorm_cpu(q_head, q_head, weights.q_norm.data(), config->norm_eps, config->head_dim);
+        rmsnorm_cpu(q_head, q_head, q_norm_.data, config->norm_eps, config->head_dim);
     }
     for (auto head = 0; head < config->n_kv_heads; ++head) {
         auto* k_head = k + head * config->head_dim;
-        rmsnorm_cpu(k_head, k_head, weights.k_norm.data(), config->norm_eps, config->head_dim);
+        rmsnorm_cpu(k_head, k_head, k_norm_.data, config->norm_eps, config->head_dim);
     }
 
     rope_cpu(q, q_dim, config->head_dim, pos, config->rope_theta, config->rotary_dim);
     rope_cpu(k, kv_dim, config->head_dim, pos, config->rope_theta, config->rotary_dim);
 
     for (auto i = 0; i < kv_dim; i++) {
-        cache.k_[i + kv_pos * kv_dim] = static_cast<std::bfloat16_t>(k[i]);
-        cache.v_[i + kv_pos * kv_dim] = static_cast<std::bfloat16_t>(v[i]);
+        k_[i + kv_pos * kv_dim] = static_cast<std::bfloat16_t>(k[i]);
+        v_[i + kv_pos * kv_dim] = static_cast<std::bfloat16_t>(v[i]);
     }
 
     // Keep sink tokens at a constant relative distance after the ring buffer fills.
     for (auto sink = 0; sink < num_sink; ++sink) {
         for (auto i = 0; i < kv_dim; i++) {
-            k[i] = static_cast<float>(cache.k_[sink * kv_dim + i]);
+            k[i] = static_cast<float>(k_[sink * kv_dim + i]);
         }
         rope_cpu(k, kv_dim, config->head_dim, 1, config->rope_theta, config->rotary_dim);
 
         for (auto i = 0; i < kv_dim; i++) {
-            cache.k_[sink * kv_dim + i] = static_cast<std::bfloat16_t>(k[i]);
+            k_[sink * kv_dim + i] = static_cast<std::bfloat16_t>(k[i]);
         }
     }
 
@@ -332,28 +651,28 @@ auto Block::Forward(
             attn_output + head * config->head_dim,
             attn_scores + head * config->max_seq_len,
             q + head * config->head_dim,
-            cache.k_.data() + kv_head * config->head_dim,
-            cache.v_.data() + kv_head * config->head_dim,
+            k_ + kv_head * config->head_dim,
+            v_ + kv_head * config->head_dim,
             config->head_dim,
             config->n_kv_heads,
             kv_len
         );
     }
 
-    matmul_cpu(projected, attn_output, weights.wo.data(), config->dim, q_dim);
+    matmul_cpu(projected, attn_output, wo_.data, config->dim, q_dim);
     for (auto i = 0; i < config->dim; ++i) {
         x[i] += projected[i];
     }
 
-    rmsnorm_cpu(norm_buffer, x, weights.mlp_norm.data(), config->norm_eps, config->dim);
+    rmsnorm_cpu(norm_buffer, x, mlp_norm_.data, config->norm_eps, config->dim);
     ffn_cpu(
         projected,
         state.lin1,
         state.lin2,
         norm_buffer,
-        weights.w1.data(),
-        weights.w2.data(),
-        weights.w3.data(),
+        w1_.data,
+        w2_.data,
+        w3_.data,
         config->hidden_dim,
         config->dim
     );

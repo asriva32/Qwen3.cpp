@@ -1,22 +1,33 @@
 # Qwen3.cpp
 
-Qwen3.cpp is a C++23 CPU inference engine for Qwen3. It builds a
-standalone native executable without a scripting runtime or language bindings.
-
+Qwen3.cpp is a C++23 CPU inference engine for Qwen3 dense models. Its end goal is running Qwen 3.8 27B.
 ## Requirements
 
 - Linux or WSL2 on an x86-64 CPU with AVX2 and FMA
 - GCC 14 or newer, or a compatible recent Clang/libstdc++ toolchain
 - CMake 3.20 or newer
 - An OpenMP development runtime
+- NVIDIA CUDA Toolkit 13.4 or newer, including an `nvcc` compiler with C++23
+  support
 
 ## Build and test
 
 ```sh
-cmake -S . -B build/cmake -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build/cmake \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
 cmake --build build/cmake
 ctest --test-dir build/cmake --output-on-failure
 ```
+
+The CUDA compiler is selected when a build directory is first configured and
+is then cached by CMake. If `/usr/local/cuda/bin/nvcc` is not the CUDA 13.4+
+compiler on your system, replace it with the path reported by
+`command -v nvcc`. Use a new build directory when switching CUDA compiler
+versions.
+
+`src/backend/inference/infer.cu` is compiled into the `qwen3_core` library as
+part of the normal build; no separate CUDA compilation step is required.
 
 Add `-DQWEN3_NATIVE_ARCH=ON` to optimize for the build machine. The resulting
 binary may then require CPU features unavailable on other machines.
@@ -45,14 +56,6 @@ Temperature sampling is enabled by default at the Qwen-recommended value of
 `0.6`. Use `--seed N` for reproducible output or `--greedy` for argmax decoding.
 
 Run `./build/cmake/qwen3 --help` for all options.
-
-## Current limitations
-
-- Qwen3 BF16 models only
-- The dependency-free tokenizer implements Qwen's ranked byte-level BPE; its
-  built-in Unicode category handling is intentionally lightweight
-- AVX2/FMA x86-64 CPUs only
-- Linux/WSL2 only
 
 ## Benchmarks
 
