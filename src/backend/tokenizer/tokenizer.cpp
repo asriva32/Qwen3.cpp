@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 
@@ -148,7 +149,19 @@ std::vector<std::string> LoadVocabulary(const Model& model) {
         std::string token;
         token.reserve(static_cast<std::size_t>(end - begin));
         for (auto it = begin; it != end; ++it) {
-            token.push_back(static_cast<char>(*it == 7 ? 0 : *it));
+            if (*it != 7) {
+                token.push_back(static_cast<char>(*it));
+                continue;
+            }
+
+            const auto escaped = std::next(it);
+            if (escaped != end && (*escaped == 7 || *escaped == 8)) {
+                token.push_back(static_cast<char>(*escaped == 7 ? 7 : 0));
+                it = escaped;
+            } else {
+                // Files written by the original format used a lone byte 7 for NUL.
+                token.push_back('\0');
+            }
         }
         vocabulary.push_back(std::move(token));
     }

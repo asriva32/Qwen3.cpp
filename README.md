@@ -44,6 +44,7 @@ chat template by default:
   --context-length 512 \
   --max-tokens 128 \
   --temperature 0.6 \
+  --device cpu \
   --threads 8
 ```
 
@@ -54,6 +55,8 @@ IDs, or `--no-eos` to run exactly the requested number of decode steps.
 
 Temperature sampling is enabled by default at the Qwen-recommended value of
 `0.6`. Use `--seed N` for reproducible output or `--greedy` for argmax decoding.
+The inference device defaults to `cpu`; it can also be selected explicitly with
+`--device cpu`.
 
 Run `./build/cmake/qwen3 --help` for all options.
 

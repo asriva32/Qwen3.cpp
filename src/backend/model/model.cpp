@@ -27,7 +27,7 @@ void BuildWeightTensor(WeightTensor& weights, std::vector<std::bfloat16_t>& from
     } 
 }
 
-void BuildDeviceArray(float*& a, size_t size, Device device) {
+auto BuildDeviceArray(float*& a, size_t size, Device device) -> void {
     if (device == Device::GPU) {
         a = static_cast<float*>(allocate_cuda_zeroed(size * sizeof(float)));
     } else {
@@ -42,10 +42,12 @@ auto Model::InitializeInference(int context_length) -> void {
 
     auto embedding  = LoadTensorData<bf16>("model.embed.weight");
     auto final_norm = LoadTensorData<bf16>("model.norm.weight");
-    auto output = LoadTensorData<bf16>("model.output.weight");
     BuildWeightTensor(embedding_, embedding, device);
     BuildWeightTensor(final_norm_, final_norm, device);
-    BuildWeightTensor(output_, output, device);
+    if (!config.tie_word_embeddings) {
+        auto output = LoadTensorData<bf16>("model.output.weight");
+        BuildWeightTensor(output_, output, device);
+    }
 
     
 
@@ -114,6 +116,8 @@ auto Model::ResetInference() -> void {
     std::fill_n(logits_, config.vocab_size, 0.0f);
 }
 
+// -- GPU --
+
 auto Model::ForwardTokenGPU(std::int32_t token, int pos, State& state) -> void {
     const auto& config = GetInferenceConfig();
     if (token < 0 || token >= config.vocab_size) {
@@ -152,52 +156,6 @@ auto Model::ForwardTokenGPU(std::int32_t token, int pos, State& state) -> void {
         ? embedding_.data
         : output_.data;
     matmul_gpu(
-        logits_,
-        normalized_state_,
-        classifier,
-        config.vocab_size,
-        config.dim
-    );
-}
-
-auto Model::ForwardTokenCPU(std::int32_t token, int pos, State& state) -> void {
-    const auto& config = GetInferenceConfig();
-    if (token < 0 || token >= config.vocab_size) {
-        throw std::out_of_range("Token id is outside the vocabulary");
-    }
-    if (pos < 0) {
-        throw std::out_of_range("Token position must not be negative");
-    }
-
-    const auto* embedding_row =
-        embedding_.data + static_cast<size_t>(token) * config.dim;
-    std::copy_n(embedding_row, config.dim, hidden_state_);
-
-    constexpr int kAttentionSinks = 4;
-    const auto context_length = config.max_seq_len;
-    const auto num_sink = pos >= context_length
-        ? std::min(kAttentionSinks, context_length - 1)
-        : 0;
-    const auto kv_pos = pos < context_length
-        ? pos
-        : num_sink + (pos - num_sink) % (context_length - num_sink);
-    const auto kv_len = std::min(pos + 1, context_length);
-
-    for (Block& block : blocks_) {
-        block.Forward(hidden_state_, pos, num_sink, kv_pos, kv_len, state);
-    }
-
-    rmsnorm_cpu(
-        normalized_state_,
-        hidden_state_,
-        final_norm_.data,
-        config.norm_eps,
-        config.dim
-    );
-    const auto classifier = config.tie_word_embeddings
-        ? embedding_.data
-        : output_.data;
-    matmul_cpu(
         logits_,
         normalized_state_,
         classifier,
@@ -263,6 +221,54 @@ auto Model::PrefillGPU(
     matmul_gpu(
         logits_,
         last_hidden,
+        classifier,
+        config.vocab_size,
+        config.dim
+    );
+}
+
+// -- CPU --
+
+auto Model::ForwardTokenCPU(std::int32_t token, int pos, State& state) -> void {
+    const auto& config = GetInferenceConfig();
+    if (token < 0 || token >= config.vocab_size) {
+        throw std::out_of_range("Token id is outside the vocabulary");
+    }
+    if (pos < 0) {
+        throw std::out_of_range("Token position must not be negative");
+    }
+
+    const auto* embedding_row =
+        embedding_.data + static_cast<size_t>(token) * config.dim;
+    std::copy_n(embedding_row, config.dim, hidden_state_);
+
+    constexpr int kAttentionSinks = 4;
+    const auto context_length = config.max_seq_len;
+    const auto num_sink = pos >= context_length
+        ? std::min(kAttentionSinks, context_length - 1)
+        : 0;
+    const auto kv_pos = pos < context_length
+        ? pos
+        : num_sink + (pos - num_sink) % (context_length - num_sink);
+    const auto kv_len = std::min(pos + 1, context_length);
+
+    for (Block& block : blocks_) {
+        block.Forward(hidden_state_, pos, num_sink, kv_pos, kv_len, state);
+    }
+
+    rmsnorm_cpu(
+        normalized_state_,
+        hidden_state_,
+        final_norm_.data,
+        config.norm_eps,
+        config.dim
+    );
+    const auto classifier = config.tie_word_embeddings
+        ? embedding_.data
+        : output_.data;
+    matmul_cpu(
+        logits_,
+        normalized_state_,
         classifier,
         config.vocab_size,
         config.dim

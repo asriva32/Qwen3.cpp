@@ -35,7 +35,7 @@ import torch
 MAGIC = b"QWEN3CP\0"
 VERSION = 1
 SUPPORTED_ARCHITECTURES = {"Qwen3ForCausalLM"}
-SUPPORTED_DTYPES = {"fp32", "fp16", "bf16"}
+SUPPORTED_DTYPES = {"bf16"}
 DTYPE_ENUM = {
     torch.float32: 1,
     torch.float16: 2,
@@ -154,7 +154,8 @@ def load_token_bytes(tokenizer_path: Path, vocab_size: int) -> tuple[torch.Tenso
             raw = bytes(byte_decoder.get(ch, 0) for ch in token)
         else:
             raw = token.replace("\u2581", " ").encode("utf-8")
-        raw = raw.replace(b"\0", b"\7")
+        raw = raw.replace(b"\x07", b"\x07\x07")
+        raw = raw.replace(b"\x00", b"\x07\x08")
         data.extend(raw)
         data.append(0)
 
@@ -302,7 +303,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Convert a Hugging Face Qwen3 model directory into a .qwen3 binary."
     )
-    parser.add_argument("--output", type=Path, help="Output .qwen3 file")
+    parser.add_argument(
+        "--output", type=Path, required=True, help="Output .qwen3 file"
+    )
     parser.add_argument(
         "--input",
         type=Path,

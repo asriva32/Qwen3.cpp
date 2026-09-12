@@ -27,6 +27,10 @@ static_assert(!std::is_copy_constructible_v<Block>);
 static_assert(!std::is_copy_assignable_v<Block>);
 static_assert(std::is_nothrow_move_constructible_v<Block>);
 static_assert(std::is_nothrow_move_assignable_v<Block>);
+static_assert(!std::is_copy_constructible_v<State>);
+static_assert(!std::is_copy_assignable_v<State>);
+static_assert(std::is_nothrow_move_constructible_v<State>);
+static_assert(std::is_nothrow_move_assignable_v<State>);
 
 void TestBatchedMatmulMatchesSequentialMatmul() {
     constexpr int batch_size = 3;
@@ -78,6 +82,25 @@ void TestBlockMoveTransfersCacheOwnership() {
     Block assigned(&config, Device::CPU);
     assigned = std::move(moved);
     assigned.ResetCache();
+}
+
+void TestStateMoveTransfersBufferOwnership() {
+    const std::string config_json =
+        R"({"act_type":"silu","arch":"Qwen3ForCausalLM","attention_bias":false,"bos_token_id":1,"dim":4,"dtype":"bf16","eos_token_id":2,"head_dim":2,"hidden_dim":6,"max_seq_len":8,"n_heads":2,"n_kv_heads":1,"n_layers":1,"norm_eps":0.000001,"qk_norm":true,"rope_theta":10000.0,"rotary_dim":2,"tie_word_embeddings":true,"vocab_size":16})";
+    Config config(config_json);
+    State source(&config, Device::CPU);
+    auto* const source_buffer = source.lin1;
+
+    State moved(std::move(source));
+    if (moved.lin1 != source_buffer || source.lin1 != nullptr) {
+        throw std::runtime_error("State move construction did not transfer ownership");
+    }
+
+    State assigned(&config, Device::CPU);
+    assigned = std::move(moved);
+    if (assigned.lin1 != source_buffer || moved.lin1 != nullptr) {
+        throw std::runtime_error("State move assignment did not transfer ownership");
+    }
 }
 
 void TestConfigParsing() {
@@ -145,6 +168,7 @@ int main() {
         TestConfigParsing();
         TestBatchedMatmulMatchesSequentialMatmul();
         TestBlockMoveTransfersCacheOwnership();
+        TestStateMoveTransfersBufferOwnership();
         TestGreedySampler();
         TestTemperatureSampler();
         TestTokenizer();

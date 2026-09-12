@@ -22,7 +22,7 @@ struct Options {
     std::optional<std::string> prompt;
     std::optional<std::uint64_t> seed;
     std::string model_path;
-    std::string device;
+    std::string device = "cpu";
     std::size_t max_tokens = 128;
     int context_length = 512;
     float temperature = Sampler::kDefaultTemperature;
@@ -44,6 +44,7 @@ void PrintUsage(std::ostream& out) {
            "  --seed N            Random seed for reproducible sampling\n"
            "  --greedy            Use deterministic argmax sampling\n"
            "  --threads N         OpenMP thread count\n"
+           "  --device DEVICE     Inference device: cpu or gpu (default: cpu)\n"
            "  --no-eos            Ignore EOS and generate exactly --max-tokens\n"
            "  -h, --help          Show this help\n";
 }
@@ -136,7 +137,7 @@ Options ParseOptions(int argc, char** argv) {
         throw std::invalid_argument("--threads must not be negative");
     }
 
-    if (options.device != "cpu" || options.device != "gpu") {
+    if (options.device != "cpu" && options.device != "gpu") {
         throw std::invalid_argument("--device must be either cpu or gpu");
     }
     return options;

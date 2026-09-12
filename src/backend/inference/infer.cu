@@ -6,6 +6,8 @@
 
 #include "layers.h"
 
+// TODO: split kernels into prefill and decode
+
 namespace {
 
 constexpr int kTileSize = 16;
@@ -33,8 +35,16 @@ void check_cuda(
 
 #define CHECK_CUDA(expression) \
     check_cuda((expression), #expression, __FILE__, __LINE__)
-
 }  // namespace
+
+static int WARP_SIZE = 0;
+static int MAX_THREADS_PER_BLOCK = 0;
+
+extern "C" void set_cuda_device(int device) {
+  CHECK_CUDA(cudaSetDevice(device));
+  CHECK_CUDA(cudaDeviceGetAttribute(&WARP_SIZE, cudaDevAttrWarpSize, device));
+  CHECK_CUDA(cudaDeviceGetAttribute(&MAX_THREADS_PER_BLOCK, cudaDevAttrMaxThreadsPerBlock, device));
+}
 
 extern "C" void* upload_cuda(void* host, size_t size) {
     void* device = nullptr;
@@ -61,6 +71,17 @@ extern "C" void free_cuda(void* device) {
     CHECK_CUDA(cudaFree(device));
 }
 
+__device__ inline float to_float(__nv_bfloat16 val) {
+    return __bfloat162float(val);
+}
+
+__device__ inline float warp_reduce_sum(float val) {
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
 __global__ void matmul_tiled(
     const float* x,
     const __nv_bfloat16* weights,
@@ -84,16 +105,16 @@ __global__ void matmul_tiled(
             ? x[static_cast<size_t>(batch) * m + x_column]
             : 0.0f;
 
-        const int weight_column = tile_start + ty;
-        weight_tile[ty][tx] = output < n && weight_column < m
-            ? __bfloat162float(
-                weights[static_cast<size_t>(output) * m + weight_column]
+        const int weight_output = blockIdx.x * kTileSize + ty;
+        const int weight_column = tile_start + tx;
+        weight_tile[tx][ty] = weight_output < n && weight_column < m
+            ? to_float(
+                weights[static_cast<size_t>(weight_output) * m + weight_column]
             )
             : 0.0f;
 
         __syncthreads();
 
-        
         for (int j = 0; j < kTileSize; ++j) {
             sum += x_tile[ty][j] * weight_tile[j][tx];
         }
@@ -114,69 +135,84 @@ void matmul_gpu(
     int m,
     int batch_size
 ) {
-    if (n <= 0 || m <= 0 || batch_size <= 0) {
-        return;
-    }
-
-    static_assert(sizeof(std::bfloat16_t) == sizeof(__nv_bfloat16));
-
-    const size_t x_bytes =
-        static_cast<size_t>(batch_size) * m * sizeof(float);
-    const size_t weight_bytes =
-        static_cast<size_t>(n) * m * sizeof(std::bfloat16_t);
-    const size_t output_bytes =
-        static_cast<size_t>(batch_size) * n * sizeof(float);
-
-    float* device_x = nullptr;
-    __nv_bfloat16* device_weights = nullptr;
-    float* device_output = nullptr;
-    CHECK_CUDA(cudaMalloc(&device_x, x_bytes));
-    CHECK_CUDA(cudaMalloc(&device_weights, weight_bytes));
-    CHECK_CUDA(cudaMalloc(&device_output, output_bytes));
-
-    CHECK_CUDA(cudaMemcpy(
-        device_x,
-        x,
-        x_bytes,
-        cudaMemcpyHostToDevice
-    ));
-    CHECK_CUDA(cudaMemcpy(
-        device_weights,
-        weights,
-        weight_bytes,
-        cudaMemcpyHostToDevice
-    ));
-
     const dim3 threads(kTileSize, kTileSize);
     const dim3 grid(
         (n + kTileSize - 1) / kTileSize,
         (batch_size + kTileSize - 1) / kTileSize
     );
     matmul_tiled<<<grid, threads>>>(
-        device_x,
-        device_weights,
-        device_output,
+        x,
+        reinterpret_cast<const __nv_bfloat16*>(weights),
+        out,
         n,
         m,
         batch_size
     );
     CHECK_CUDA(cudaGetLastError());
-
-    CHECK_CUDA(cudaMemcpy(
-        out,
-        device_output,
-        output_bytes,
-        cudaMemcpyDeviceToHost
-    ));
-    // could also just leak memory
-    CHECK_CUDA(cudaFree(device_output));
-    CHECK_CUDA(cudaFree(device_weights));
-    CHECK_CUDA(cudaFree(device_x));
 }
 
-void rope_gpu(float *out, int d, int head_dim, int pos, float theta, int rotary_dim) {
+__global__
+void rmsnorm(
+    const float * x,
+    const __nv_bfloat16 *weights,
+    float *out,
+    float eps,
+    int n,
+    int batch_size
+) {
+    // n * row is the inner
+    int row = blockIdx.x;
+    int tx = threadIdx.x;
 
+    if (row >= batch_size){
+        return;
+    }
+
+    const size_t offset = row * n;
+
+    float sum_sq = 0.0f;
+
+    for (int col = tx; col < n; col += blockDim.x) {
+        sum_sq += x[offset + col] * x[offset + col];
+    }
+
+    extern __shared__ float shared_sum[];
+    shared_sum[tx] = sum_sq;
+    __syncthreads();
+
+    // blockDim.x must be a power of two.
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tx < stride){
+            shared_sum[tx] += shared_sum[tx + stride];
+        }
+        __syncthreads();
+    }
+
+    const float inv_rms =
+        rsqrtf(shared_sum[0] / static_cast<float>(n) + eps);
+
+    for (int col = tx; col < n; col += blockDim.x) {
+        const float weight = to_float(weights[col]);
+        out[offset + col] = x[offset + col] * inv_rms * weight;
+    }
 }
+
+void rmsnorm_gpu(
+    float *out,
+    const float *x,
+    const std::bfloat16_t *weights,
+    float eps,
+    int n,
+    int batch_size
+) {
+    int threads = 256;
+    size_t shared_bytes = threads * sizeof(float);
+    rmsnorm<<<batch_size, threads, shared_bytes>>>(
+        x, reinterpret_cast<const __nv_bfloat16*>(weights), out, eps, n, batch_size);
+    CHECK_CUDA(cudaGetLastError());
+}
+
+// can fuse rope and cache updates
 __device__ float silu(float x) {
     return x / (1.0f + expf(-x));
 }

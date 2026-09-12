@@ -11,15 +11,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install compiler
+      - name: Install compiler and CUDA toolkit
         run: |
           sudo apt-get update
-          sudo apt-get install --yes g++-14
+          sudo apt-get install --yes g++-14 wget
+          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg --install cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install --yes cuda-compiler-13-4 cuda-cudart-dev-13-4
+          echo "/usr/local/cuda-13.4/bin" >> "$GITHUB_PATH"
 
       - name: Configure
         env:
           CC: gcc-14
           CXX: g++-14
+          CUDACXX: /usr/local/cuda-13.4/bin/nvcc
+          CUDAHOSTCXX: /usr/bin/g++-14
         run: cmake -S . -B build/cmake -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
