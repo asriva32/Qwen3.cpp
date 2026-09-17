@@ -69,6 +69,34 @@ void TestBatchedMatmulMatchesSequentialMatmul() {
     }
 }
 
+void TestRopeUsesAdjacentPairs() {
+    std::array<float, 12> values{
+        1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
+        7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f,
+    };
+
+    rope_cpu(values.data(), values.size(), 6, 1, 1.0f, 4);
+
+    const auto cosine = std::cos(1.0f);
+    const auto sine = std::sin(1.0f);
+    const std::array<float, 12> expected{
+        1.0f * cosine - 2.0f * sine, 2.0f * cosine + 1.0f * sine,
+        3.0f * cosine - 4.0f * sine, 4.0f * cosine + 3.0f * sine,
+        5.0f, 6.0f,
+        7.0f * cosine - 8.0f * sine, 8.0f * cosine + 7.0f * sine,
+        9.0f * cosine - 10.0f * sine, 10.0f * cosine + 9.0f * sine,
+        11.0f, 12.0f,
+    };
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (std::abs(values[i] - expected[i]) > 1e-5f) {
+            throw std::runtime_error(
+                "RoPE did not rotate adjacent pairs at element " +
+                std::to_string(i)
+            );
+        }
+    }
+}
+
 void TestBlockMoveTransfersCacheOwnership() {
     const std::string config_json =
         R"({"act_type":"silu","arch":"Qwen3ForCausalLM","attention_bias":false,"bos_token_id":1,"dim":4,"dtype":"bf16","eos_token_id":2,"head_dim":2,"hidden_dim":6,"max_seq_len":8,"n_heads":2,"n_kv_heads":1,"n_layers":1,"norm_eps":0.000001,"qk_norm":true,"rope_theta":10000.0,"rotary_dim":2,"tie_word_embeddings":true,"vocab_size":16})";
@@ -167,6 +195,7 @@ int main() {
     try {
         TestConfigParsing();
         TestBatchedMatmulMatchesSequentialMatmul();
+        TestRopeUsesAdjacentPairs();
         TestBlockMoveTransfersCacheOwnership();
         TestStateMoveTransfersBufferOwnership();
         TestGreedySampler();

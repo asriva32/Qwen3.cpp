@@ -14,7 +14,8 @@ class Block {
 friend class Model;
 
 public:
-    void Forward(float* x, int pos, int num_sink, int kv_pos, int kv_len, State &state);
+    void ForwardCPU(float* x, int pos, int num_sink, int kv_pos, int kv_len, State &state);
+    void ForwardGPU(float* x, int pos, int num_sink, int kv_pos, int kv_len, State &state);
     void ForwardPrefillCPU(float* x, size_t num_tokens, int pos, State& state);
     void ForwardPrefillGPU(float* x, size_t num_tokens, int pos, State& state);
     
@@ -62,12 +63,14 @@ void  rope_cpu(float *out, int d, int head_dim, int pos, float theta, int rotary
 void  ffn_cpu(float *out, float *lin1, float *lin2, const float *x, const std::bfloat16_t *w1, const std::bfloat16_t *w2, const std::bfloat16_t *w3, int hidden_dim, int dim, int batch_size = 1);
 void  attn_cpu(float *out, float *atth, const float *q, const std::bfloat16_t *k, const std::bfloat16_t *v, int head_dim, int n_kv_heads, int kv_len);
 // gpu impl
-// first implement rmsnorm (seems the easiest)
-// also need to add 4bit quantization after implementing all these kernels
 void  rmsnorm_gpu(float *out, const float *x, const std::bfloat16_t *weights, float eps, int n, int batch_size = 1);
 void  matmul_gpu(float *out, const float *x, const std::bfloat16_t *y, int n, int m, int batch_size = 1);
-void  rope_gpu(float *out, int d, int head_dim, int pos, float theta, int rotary_dim);
+void  qk_norm_rope_and_update_cache(float *q, float *k, const float *v, std::bfloat16_t *cache_k, std::bfloat16_t *cache_v, const std::bfloat16_t *q_norm, const std::bfloat16_t *k_norm, int n_heads, int n_kv_heads, int head_dim, int pos, int kv_pos, float norm_eps, float theta, int rotary_dim, int batch_size = 1);
+void  rotate_sink_tokens(std::bfloat16_t *cache_k, size_t num_sink, size_t kv_dim, int head_dim, float rope_theta, int rotary_dim);
 void  ffn_gpu(float *out, float *lin1, float *lin2, const float *x, const std::bfloat16_t *w1, const std::bfloat16_t *w2, const std::bfloat16_t *w3, int hidden_dim, int dim, int batch_size = 1);
-void  attn_gpu(float *out, float *atth, const float *q, const std::bfloat16_t *k, const std::bfloat16_t *v, int head_dim, int n_kv_heads, int kv_len);
+void  attn_gpu(float *out, float *atth, const float *q, const std::bfloat16_t *k, const std::bfloat16_t *v, int head_dim, int n_heads, int n_kv_heads, int kv_len_start, int max_seq_len, int batch_size = 1);
+void  add_gpu(float *destination, const float *source, size_t count);
+void  embedding_gpu(float *out, const std::bfloat16_t *embedding_row, int dim);
+void  argmax_gpu(std::int32_t *out, const float *values, int count);
 
 #endif

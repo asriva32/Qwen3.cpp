@@ -200,7 +200,7 @@ auto Block::ForwardPrefillGPU(
     const auto q_dim = config->n_heads * config->head_dim;
     const auto kv_dim = config->n_kv_heads * config->head_dim;
 
-    rmsnorm_cpu(
+    rmsnorm_gpu(
         norm_buffer,
         x,
         attn_norm_.data,
@@ -218,6 +218,7 @@ auto Block::ForwardPrefillGPU(
         config->dim,
         batch_size
     );
+
     matmul_gpu(
         k,
         norm_buffer,
@@ -236,88 +237,42 @@ auto Block::ForwardPrefillGPU(
         batch_size
     );
 
-    // Q/K norm
-    #pragma omp parallel for collapse(2)
-    for (size_t t = 0; t < num_tokens; ++t) {
-        for (int head = 0; head < config->n_heads; ++head) {
-            auto* q_head = q + t * q_dim + head * config->head_dim;
-            rmsnorm_cpu(q_head, q_head, q_norm_.data, config->norm_eps,
-                    config->head_dim);
-        }
-    }
-
-    #pragma omp parallel for collapse(2)
-    for (size_t t = 0; t < num_tokens; ++t) {
-        for (int head = 0; head < config->n_kv_heads; ++head) {
-            auto* k_head = k + t * kv_dim + head * config->head_dim;
-            rmsnorm_cpu(k_head, k_head, k_norm_.data, config->norm_eps,
-                    config->head_dim);
-        }
-    }
-
-    // Rope
-
-    #pragma omp parallel for
-    for (size_t t = 0; t < num_tokens; ++t) {
-        const auto token_pos = pos + static_cast<int>(t);
-
-        rope_cpu(
-            q + t * q_dim,
-            q_dim,
-            config->head_dim,
-            token_pos,
-            config->rope_theta,
-            config->rotary_dim
-        );
-
-        rope_cpu(
-            k + t * kv_dim,
-            kv_dim,
-            config->head_dim,
-            token_pos,
-            config->rope_theta,
-            config->rotary_dim
-        );
-    }
-
-    // Prefill is bounded by the context length, so cache positions are contiguous.
-    #pragma omp parallel for
-    for (size_t t = 0; t < num_tokens; ++t) {
-        const auto kv_pos = start + t;
-        const float* k_token = k + t * kv_dim;
-        const float* v_token = v + t * kv_dim;
-        auto* cache_k = k_ + kv_pos * kv_dim;
-        auto* cache_v = v_ + kv_pos * kv_dim;
-
-        for (int i = 0; i < kv_dim; ++i) {
-            cache_k[i] = static_cast<std::bfloat16_t>(k_token[i]);
-            cache_v[i] = static_cast<std::bfloat16_t>(v_token[i]);
-        }
-    }
+    // Normalize Q/K, apply RoPE, and update the contiguous KV-cache chunk.
+    qk_norm_rope_and_update_cache(
+        q,
+        k,
+        v,
+        k_,
+        v_,
+        q_norm_.data,
+        k_norm_.data,
+        config->n_heads,
+        config->n_kv_heads,
+        config->head_dim,
+        pos,
+        static_cast<int>(start),
+        config->norm_eps,
+        config->rope_theta,
+        config->rotary_dim,
+        batch_size
+    );
 
     // Each query attends only through its own position, preserving causality even
     // though the complete chunk has already been written to the KV cache.
 
-    const int queries_per_kv_head = config->n_heads / config->n_kv_heads;
-
-    #pragma omp parallel for collapse(2)
-    for (size_t t = 0; t < num_tokens; ++t) {
-        for (int head = 0; head < config->n_heads; ++head) {
-            const int kv_head = head / queries_per_kv_head;
-
-            const auto kv_len = pos + static_cast<int>(t) + 1;
-            attn_cpu(
-                attn_output + t * q_dim + head * config->head_dim,
-                attn_scores + (t * config->n_heads + head) * config->max_seq_len,
-                q + t * q_dim + head * config->head_dim,
-                k_ + kv_head * config->head_dim,
-                v_ + kv_head * config->head_dim,
-                config->head_dim,
-                config->n_kv_heads,
-                kv_len
-            );
-        }
-    }
+    attn_gpu(
+        attn_output,
+        attn_scores,
+        q,
+        k_,
+        v_,
+        config->head_dim,
+        config->n_heads,
+        config->n_kv_heads,
+        pos + 1,
+        config->max_seq_len,
+        batch_size
+    );
 
     // output projection
 
@@ -331,16 +286,11 @@ auto Block::ForwardPrefillGPU(
     );
 
     // Residual
-    #pragma omp parallel for collapse(2)
-    for (size_t t = 0; t < num_tokens; ++t) {
-        for (int i = 0; i < config->dim; ++i) {
-            x[t * config->dim + i] += projected[t * config->dim + i];
-        }
-    }
+    add_gpu(x, projected, num_tokens * static_cast<size_t>(config->dim));
 
     // MLP
 
-    rmsnorm_cpu(
+    rmsnorm_gpu(
         norm_buffer,
         x,
         mlp_norm_.data,
@@ -349,9 +299,9 @@ auto Block::ForwardPrefillGPU(
         batch_size
     );
 
-    
+
     // batched ffn
-    ffn_cpu(
+    ffn_gpu(
         projected,
         state.lin1,
         state.lin2,
@@ -365,12 +315,7 @@ auto Block::ForwardPrefillGPU(
     );
 
     // Final residual
-    #pragma omp parallel for collapse(2)
-    for (size_t t = 0; t < num_tokens; ++t) {
-        for (int i = 0; i < config->dim; ++i) {
-            x[t * config->dim + i] += projected[t * config->dim + i];
-        }
-    }
+    add_gpu(x, projected, num_tokens * static_cast<size_t>(config->dim));
 }
 
 // ForwardPrefill
@@ -561,7 +506,7 @@ auto Block::ForwardPrefillCPU(
         batch_size
     );
 
-    
+
     // batched ffn
     ffn_cpu(
         projected,
@@ -585,7 +530,94 @@ auto Block::ForwardPrefillCPU(
     }
 }
 
-auto Block::Forward(
+auto Block::ForwardGPU(
+    float* x,
+    int pos,
+    int num_sink,
+    int kv_pos,
+    int kv_len,
+    State &state
+) -> void {
+    if (!x) {
+        throw std::invalid_argument("Block input must not be null");
+    }
+    auto& q = state.q;
+    auto& k = state.k;
+    auto& v = state.v;
+    auto& norm_buffer = state.norm_buffer;
+    auto& attn_scores = state.attn_scores;
+    auto& attn_output = state.attn_output;
+    auto& projected = state.projected;
+
+
+    const auto q_dim = config->n_heads * config->head_dim;
+    const auto kv_dim = config->n_kv_heads * config->head_dim;
+
+    rmsnorm_gpu(norm_buffer, x, attn_norm_.data , config->norm_eps, config->dim);
+    matmul_gpu(q, norm_buffer, wq_.data, q_dim, config->dim);
+    matmul_gpu(k, norm_buffer, wk_.data, kv_dim, config->dim);
+    matmul_gpu(v, norm_buffer, wv_.data, kv_dim, config->dim);
+
+    qk_norm_rope_and_update_cache(
+        q,
+        k,
+        v,
+        k_,
+        v_,
+        q_norm_.data,
+        k_norm_.data,
+        config->n_heads,
+        config->n_kv_heads,
+        config->head_dim,
+        pos,
+        kv_pos,
+        config->norm_eps,
+        config->rope_theta,
+        config->rotary_dim
+    );
+
+    // Keep sink tokens at a constant relative distance after the ring buffer fills.
+    rotate_sink_tokens(
+        k_,
+        static_cast<size_t>(num_sink),
+        static_cast<size_t>(kv_dim),
+        config->head_dim,
+        config->rope_theta,
+        config->rotary_dim
+    );
+
+    attn_gpu(
+        attn_output,
+        attn_scores,
+        q,
+        k_,
+        v_,
+        config->head_dim,
+        config->n_heads,
+        config->n_kv_heads,
+        kv_len,
+        config->max_seq_len
+    );
+
+    matmul_gpu(projected, attn_output, wo_.data, config->dim, q_dim);
+    add_gpu(x, projected, config->dim);
+
+    rmsnorm_gpu(norm_buffer, x, mlp_norm_.data, config->norm_eps, config->dim);
+    ffn_gpu(
+        projected,
+        state.lin1,
+        state.lin2,
+        norm_buffer,
+        w1_.data,
+        w2_.data,
+        w3_.data,
+        config->hidden_dim,
+        config->dim
+    );
+    add_gpu(x, projected, config->dim);
+}
+
+auto Block::ForwardCPU(
     float* x,
     int pos,
     int num_sink,
@@ -612,7 +644,7 @@ auto Block::Forward(
     matmul_cpu(q, norm_buffer, wq_.data, q_dim, config->dim);
     matmul_cpu(k, norm_buffer, wk_.data, kv_dim, config->dim);
     matmul_cpu(v, norm_buffer, wv_.data, kv_dim, config->dim);
-    
+
     for (auto head = 0; head < config->n_heads; ++head) {
         auto* q_head = q + head * config->head_dim;
         rmsnorm_cpu(q_head, q_head, q_norm_.data, config->norm_eps, config->head_dim);
@@ -851,20 +883,18 @@ auto rope_cpu(
     float theta,
     int rotary_dim
 ) -> void {
-    const auto rotary_half = rotary_dim / 2;
-    for (int head_start = 0; head_start < d; head_start += head_dim) {
-        for (int i = 0; i < rotary_half; ++i) {
-            const auto freq = 1.0f / powf(theta, 2.0f * i / rotary_dim);
-            const auto angle = pos * freq;
-            const auto cosine = cosf(angle);
-            const auto sine = sinf(angle);
-            const auto first_index = head_start + i;
-            const auto second_index = first_index + rotary_half;
-            const auto first = out[first_index];
-            const auto second = out[second_index];
-            out[first_index] = first * cosine - second * sine;
-            out[second_index] = second * cosine + first * sine;
-        }
+    for (int i = 0; i < d; i += 2) {
+        const auto head_index = i % head_dim;
+        const auto freq = head_index >= rotary_dim
+            ? 0.0f
+            : 1.0f / powf(theta, 1.0f * head_index / rotary_dim);
+        const auto angle = pos * freq;
+        const auto cosine = cosf(angle);
+        const auto sine = sinf(angle);
+        const auto first = out[i];
+        const auto second = out[i + 1];
+        out[i] = first * cosine - second * sine;
+        out[i + 1] = first * sine + second * cosine;
     }
 }
 
@@ -916,7 +946,7 @@ auto attn_cpu(
     for (auto i = 0; i < head_dim; i++) {
         out[i] = 0.0f;
     }
-    // Vectorize this
+
     for (auto token = 0; token < kv_len; ++token) {
         const float score = atth[token];
         const auto* value = v + token * stride;

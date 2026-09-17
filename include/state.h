@@ -13,6 +13,8 @@ extern "C" void* allocate_cuda_zeroed(size_t size);
 extern "C" void zero_cuda(void* device, size_t size);
 extern "C" void free_cuda(void* device);
 extern "C" void set_cuda_device(int device);
+extern "C" void download_cuda(void* host, const void* device, size_t size);
+extern "C" void synchronize_cuda();
 
 inline constexpr size_t kPrefillBatchSize = 128;
 
@@ -28,6 +30,7 @@ struct State {
     float* attn_output = nullptr;
     float* projected = nullptr;
     float* attn_scores = nullptr;
+    std::int32_t* sampled_token = nullptr;
     size_t batch_capacity = 0;
     Device device = Device::CPU;
 
@@ -51,6 +54,7 @@ struct State {
             projected   = new float[batch_capacity * static_cast<size_t>(c->dim)];
             attn_scores = new float[batch_capacity * static_cast<size_t>(c->n_heads) 
                 * static_cast<size_t>(c->max_seq_len)];
+            sampled_token = new std::int32_t[1];
         } else {
             const auto allocate = [](size_t count) {
                 return static_cast<float*>(
@@ -66,6 +70,9 @@ struct State {
             attn_output = allocate(batch_capacity * static_cast<size_t>(q_dim));
             projected   = allocate(batch_capacity * static_cast<size_t>(c->dim));
             attn_scores = allocate(batch_capacity * static_cast<size_t>(c->n_heads) * static_cast<size_t>(c->max_seq_len));
+            sampled_token = static_cast<std::int32_t*>(
+                allocate_cuda_zeroed(sizeof(std::int32_t))
+            );
         }
     }
 
@@ -100,6 +107,7 @@ private:
             delete[] attn_output;
             delete[] projected;
             delete[] attn_scores;
+            delete[] sampled_token;
         } else {
             free_cuda(lin1);
             free_cuda(lin2);
@@ -110,6 +118,7 @@ private:
             free_cuda(attn_output);
             free_cuda(projected);
             free_cuda(attn_scores);
+            free_cuda(sampled_token);
         }
         lin1 = nullptr;
         lin2 = nullptr;
@@ -120,6 +129,7 @@ private:
         attn_output = nullptr;
         projected = nullptr;
         attn_scores = nullptr;
+        sampled_token = nullptr;
         batch_capacity = 0;
     }
 
@@ -133,6 +143,7 @@ private:
         attn_output = std::exchange(other.attn_output, nullptr);
         projected = std::exchange(other.projected, nullptr);
         attn_scores = std::exchange(other.attn_scores, nullptr);
+        sampled_token = std::exchange(other.sampled_token, nullptr);
         batch_capacity = std::exchange(other.batch_capacity, 0);
         device = other.device;
     }

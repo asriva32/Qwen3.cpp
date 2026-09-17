@@ -24,6 +24,7 @@ public:
     using TokenCallback = std::function<void(std::int32_t)>;
 
     explicit Model(const std::string& path, int context_length = 512, Device device = Device::CPU);
+    ~Model();
 
     Model(const Model&) = delete;
     Model& operator=(const Model&) = delete;
@@ -78,21 +79,20 @@ private:
     void ForwardTokenCPU(std::int32_t token, int pos, State &state);
     void PrefillGPU(const std::span<const std::int32_t> tokens, int pos, State &state);
     void ForwardTokenGPU(std::int32_t token, int pos, State &state);
+    void ReleaseInference() noexcept;
 
     std::string model_path_;
     std::unordered_map<std::string, TensorInfo> tensors_;
     std::shared_ptr<Config> inference_config_;
     int model_max_seq_len_ = 0;
     std::vector<Block> blocks_;
-    // branch on gpu
     using bf16 = std::bfloat16_t;
-    // not implementing destructor since if model out of scope that basically means program end
     WeightTensor embedding_;
     WeightTensor final_norm_;
     WeightTensor output_;
-    float* hidden_state_;
-    float* normalized_state_;
-    float* logits_;
+    float* hidden_state_ = nullptr;
+    float* normalized_state_ = nullptr;
+    float* logits_ = nullptr;
     Device device;
 };
 

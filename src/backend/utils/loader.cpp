@@ -273,6 +273,9 @@ Model::Model(const std::string& path, int context_length, Device device) : devic
         SkipBytes(in, info.byte_size);
     }
 
+    if (device == Device::GPU) {
+        set_cuda_device(0);
+    }
     InitializeInference(context_length);
 }
 

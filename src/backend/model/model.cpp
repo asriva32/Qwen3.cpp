@@ -21,10 +21,13 @@ std::bfloat16_t* CopyTensorData(std::bfloat16_t *a, size_t size) {
 // can improve this later
 void BuildWeightTensor(WeightTensor& weights, std::vector<std::bfloat16_t>& from, Device device) {
     weights.size = from.size();
-    weights.data = CopyTensorData(from.data(), weights.size);
     if (device == Device::GPU) {
-        weights.data = static_cast<std::bfloat16_t*>(upload_cuda(weights.data, weights.size * sizeof(std::bfloat16_t)));
-    } 
+        weights.data = static_cast<std::bfloat16_t*>(
+            upload_cuda(from.data(), weights.size * sizeof(std::bfloat16_t))
+        );
+    } else {
+        weights.data = CopyTensorData(from.data(), weights.size);
+    }
 }
 
 auto BuildDeviceArray(float*& a, size_t size, Device device) -> void {
@@ -36,6 +39,7 @@ auto BuildDeviceArray(float*& a, size_t size, Device device) -> void {
 }
 
 auto Model::InitializeInference(int context_length) -> void {
+    ReleaseInference();
     auto& config = GetInferenceConfig();
     config.max_seq_len = context_length;
     using bf16 = std::bfloat16_t;
@@ -102,6 +106,37 @@ auto Model::InitializeInference(int context_length) -> void {
     BuildDeviceArray(logits_, config.vocab_size, device);
 }
 
+Model::~Model() {
+    ReleaseInference();
+}
+
+auto Model::ReleaseInference() noexcept -> void {
+    blocks_.clear();
+    const auto release_weight = [this](WeightTensor& weight) {
+        if (device == Device::GPU) {
+            free_cuda(weight.data);
+        } else {
+            delete[] weight.data;
+        }
+        weight = {};
+    };
+    release_weight(embedding_);
+    release_weight(final_norm_);
+    release_weight(output_);
+
+    const auto release_float = [this](float*& pointer) {
+        if (device == Device::GPU) {
+            free_cuda(pointer);
+        } else {
+            delete[] pointer;
+        }
+        pointer = nullptr;
+    };
+    release_float(hidden_state_);
+    release_float(normalized_state_);
+    release_float(logits_);
+}
+
 auto Model::ResetInference() -> void {
     for (Block& block : blocks_) {
         block.ResetCache();
@@ -111,9 +146,19 @@ auto Model::ResetInference() -> void {
         kPrefillBatchSize,
         static_cast<size_t>(config.max_seq_len)
     );
-    std::fill_n(hidden_state_, prefill_capacity * config.dim, 0.0f);
-    std::fill_n(normalized_state_, prefill_capacity * config.dim, 0.0f);
-    std::fill_n(logits_, config.vocab_size, 0.0f);
+    if (device == Device::GPU) {
+        zero_cuda(
+            hidden_state_, prefill_capacity * config.dim * sizeof(float)
+        );
+        zero_cuda(
+            normalized_state_, prefill_capacity * config.dim * sizeof(float)
+        );
+        zero_cuda(logits_, config.vocab_size * sizeof(float));
+    } else {
+        std::fill_n(hidden_state_, prefill_capacity * config.dim, 0.0f);
+        std::fill_n(normalized_state_, prefill_capacity * config.dim, 0.0f);
+        std::fill_n(logits_, config.vocab_size, 0.0f);
+    }
 }
 
 // -- GPU --
@@ -129,7 +174,7 @@ auto Model::ForwardTokenGPU(std::int32_t token, int pos, State& state) -> void {
 
     const auto* embedding_row =
         embedding_.data + static_cast<size_t>(token) * config.dim;
-    std::copy_n(embedding_row, config.dim, hidden_state_);
+    embedding_gpu(hidden_state_, embedding_row, config.dim);
 
     constexpr int kAttentionSinks = 4;
     const auto context_length = config.max_seq_len;
@@ -142,10 +187,10 @@ auto Model::ForwardTokenGPU(std::int32_t token, int pos, State& state) -> void {
     const auto kv_len = std::min(pos + 1, context_length);
 
     for (Block& block : blocks_) {
-        block.Forward(hidden_state_, pos, num_sink, kv_pos, kv_len, state);
+        block.ForwardGPU(hidden_state_, pos, num_sink, kv_pos, kv_len, state);
     }
 
-    rmsnorm_cpu(
+    rmsnorm_gpu(
         normalized_state_,
         hidden_state_,
         final_norm_.data,
@@ -184,10 +229,6 @@ auto Model::PrefillGPU(
     if (start > context_length || num_tokens > context_length - start) {
         throw std::out_of_range("Prefill chunk exceeds maximum context length");
     }
-    // if (num_tokens > state.batch_capacity ||
-    //     num_tokens > hidden_state_.size() / static_cast<size_t>(config.dim)) {
-    //     throw std::length_error("Prefill chunk exceeds CPU batch capacity");
-    // }
 
     for (auto t{0uz}; t < num_tokens; ++t) {
         const auto token = tokens[t];
@@ -198,14 +239,14 @@ auto Model::PrefillGPU(
             embedding_.data + static_cast<size_t>(token) * config.dim;
         auto* destination =
             hidden_state_ + static_cast<size_t>(t) * config.dim;
-        std::copy_n(embedding_row, config.dim, destination);
+        embedding_gpu(destination, embedding_row, config.dim);
     }
 
     for (Block& block : blocks_) {
         block.ForwardPrefillGPU(hidden_state_, num_tokens, pos, state);
     }
 
-    rmsnorm_cpu(
+    rmsnorm_gpu(
         normalized_state_,
         hidden_state_,
         final_norm_.data,
@@ -253,7 +294,7 @@ auto Model::ForwardTokenCPU(std::int32_t token, int pos, State& state) -> void {
     const auto kv_len = std::min(pos + 1, context_length);
 
     for (Block& block : blocks_) {
-        block.Forward(hidden_state_, pos, num_sink, kv_pos, kv_len, state);
+        block.ForwardCPU(hidden_state_, pos, num_sink, kv_pos, kv_len, state);
     }
 
     rmsnorm_cpu(
@@ -371,15 +412,43 @@ auto Model::Generate(
             PrefillGPU(batch_tokens, static_cast<int>(i), state);
         }
     }
+    if (device == Device::GPU) {
+        synchronize_cuda();
+    }
     const auto prefill_end = std::chrono::steady_clock::now();
     result.stats.prefill_seconds =
         std::chrono::duration<double>(prefill_end - prefill_start).count();
 
     const auto decode_start = std::chrono::steady_clock::now();
     Sampler sampler(temperature, seed);
+    std::vector<float> host_logits;
+    if (device == Device::GPU) {
+        host_logits.resize(config.vocab_size);
+    }
     auto pos = static_cast<int>(prompt_tokens.size());
     while (result.tokens.size() < max_generated_tokens) {
-        const auto token = sampler.Sample(std::span<const float>(logits_, config.vocab_size));
+        std::int32_t token;
+        if (device == Device::GPU && temperature == 0.0f) {
+            argmax_gpu(state.sampled_token, logits_, config.vocab_size);
+            download_cuda(
+                &token,
+                state.sampled_token,
+                sizeof(token)
+            );
+        } else {
+            const float* sampling_logits = logits_;
+            if (device == Device::GPU) {
+                download_cuda(
+                    host_logits.data(),
+                    logits_,
+                    host_logits.size() * sizeof(float)
+                );
+                sampling_logits = host_logits.data();
+            }
+            token = sampler.Sample(
+                std::span<const float>(sampling_logits, config.vocab_size)
+            );
+        }
         if (stop_on_eos && token == config.eos_token_id) {
             result.stats.stopped_on_eos = true;
             break;
@@ -387,6 +456,9 @@ auto Model::Generate(
         result.tokens.push_back(token);
         if (on_token) {
             on_token(token);
+        }
+        if (result.tokens.size() == max_generated_tokens) {
+            break;
         }
         if (device == Device::CPU) {
             ForwardTokenCPU(token, pos++, state);    

@@ -1,6 +1,6 @@
 # Qwen3.cpp
 
-Qwen3.cpp is a C++23 CPU inference engine for Qwen3 dense models. Its end goal is running Qwen 3.8 27B.
+Qwen3.cpp is a C++23 inference engine for Qwen3 dense models
 ## Requirements
 
 - Linux or WSL2 on an x86-64 CPU with AVX2 and FMA

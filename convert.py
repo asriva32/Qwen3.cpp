@@ -216,6 +216,25 @@ def convert_weight(tensor: torch.Tensor, dtype: str) -> torch.Tensor:
     return tensor.to(target_dtype(dtype)).contiguous()
 
 
+def interleave_rope_coordinates(
+    tensor: torch.Tensor, head_dim: int, rotary_dim: int
+) -> torch.Tensor:
+    """Convert split-half RoPE coordinates to adjacent complex pairs per head."""
+    if tensor.shape[0] % head_dim != 0:
+        raise ValueError(
+            f"RoPE tensor's first dimension ({tensor.shape[0]}) must be divisible "
+            f"by head_dim ({head_dim})"
+        )
+
+    heads = tensor.reshape(-1, head_dim, *tensor.shape[1:])
+    rotary = heads[:, :rotary_dim]
+    rotary_half = rotary_dim // 2
+    interleaved = torch.stack(
+        (rotary[:, :rotary_half], rotary[:, rotary_half:]), dim=2
+    ).flatten(1, 2)
+    return torch.cat((interleaved, heads[:, rotary_dim:]), dim=1).reshape(tensor.shape)
+
+
 def tensor_plan(metadata: Metadata) -> list[tuple[str, str]]:
     plan: list[tuple[str, str]] = [
         ("model.embed.weight", "model.embed_tokens.weight"),
@@ -287,7 +306,19 @@ def convert(input_dir: Path, output_path: Path, dtype: str) -> None:
         out.write(struct.pack("<Q", tensor_count))
 
         for idx, (dst, src) in enumerate(plan, 1):
-            tensor = convert_weight(store.get(src), dtype)
+            tensor = store.get(src)
+            if dst.endswith(
+                (
+                    ".attn.q_norm.weight",
+                    ".attn.k_norm.weight",
+                    ".attn.wq.weight",
+                    ".attn.wk.weight",
+                )
+            ):
+                tensor = interleave_rope_coordinates(
+                    tensor, metadata.head_dim, metadata.rotary_dim
+                )
+            tensor = convert_weight(tensor, dtype)
             print(f"[{idx}/{tensor_count}] {dst} {tuple(tensor.shape)} {tensor.dtype}")
             write_tensor(out, dst, tensor)
 
