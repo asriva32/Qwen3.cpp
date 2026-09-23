@@ -20,14 +20,10 @@ cmake --build build/cmake
 ctest --test-dir build/cmake --output-on-failure
 ```
 
-The CUDA compiler is selected when a build directory is first configured and
-is then cached by CMake. If `/usr/local/cuda/bin/nvcc` is not the CUDA 13.4+
+If `/usr/local/cuda/bin/nvcc` is not the CUDA 13.4+
 compiler on your system, replace it with the path reported by
 `command -v nvcc`. Use a new build directory when switching CUDA compiler
 versions.
-
-`src/backend/inference/infer.cu` is compiled into the `qwen3_core` library as
-part of the normal build; no separate CUDA compilation step is required.
 
 Add `-DQWEN3_NATIVE_ARCH=ON` to optimize for the build machine. The resulting
 binary may then require CPU features unavailable on other machines.
@@ -62,13 +58,12 @@ Run `./build/cmake/qwen3 --help` for all options.
 
 ## Benchmarks
 
-On an AMD Ryzen AI 9 HX 370 with 32 GB DDR5-7500, using BF16 weights and eight
+CPU: On an AMD Ryzen AI 9 HX 370 with 32 GB DDR5-7500, using BF16 weights and eight
 threads:
 
 | Engine | Model | Prefill | Decode |
 | --- | --- | ---: | ---: |
 | Qwen3.cpp | Qwen3-0.6B | 207.59 tok/s | 51.93 tok/s |
-| Qwen3.cpp | Qwen3-4B | 16.08 tok/s | 8.02 tok/s |
 
 Both rows report the median results from five runs of a 91-token prompt followed
 by 16 fixed greedy decode steps. The binary was built with
