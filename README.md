@@ -7,8 +7,8 @@ Qwen3.cpp is a C++23 inference engine for Qwen3 dense models
 - GCC 14 or newer, or a compatible recent Clang/libstdc++ toolchain
 - CMake 3.20 or newer
 - An OpenMP development runtime
-- NVIDIA CUDA Toolkit 13.4 or newer, including an `nvcc` compiler with C++23
-  support
+- Optional: NVIDIA CUDA Toolkit 13.4 or newer, including an `nvcc` compiler
+  with C++23 support, for GPU inference
 
 ## Build and test
 
@@ -24,6 +24,17 @@ If `/usr/local/cuda/bin/nvcc` is not the CUDA 13.4+
 compiler on your system, replace it with the path reported by
 `command -v nvcc`. Use a new build directory when switching CUDA compiler
 versions.
+
+CUDA is enabled when a CUDA compiler is available. For a CPU-only build that
+does not require the CUDA toolkit, configure with:
+
+```sh
+cmake -S . -B build/cpu \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DQWEN3_ENABLE_CUDA=OFF
+cmake --build build/cpu
+ctest --test-dir build/cpu --output-on-failure
+```
 
 Add `-DQWEN3_NATIVE_ARCH=ON` to optimize for the build machine. The resulting
 binary may then require CPU features unavailable on other machines.
@@ -51,8 +62,8 @@ IDs, or `--no-eos` to run exactly the requested number of decode steps.
 
 Temperature sampling is enabled by default at the Qwen-recommended value of
 `0.6`. Use `--seed N` for reproducible output or `--greedy` for argmax decoding.
-The inference device defaults to `cpu`; it can also be selected explicitly with
-`--device cpu`.
+The inference device defaults to `cpu`; CUDA-enabled builds also support
+`--device gpu`.
 
 Run `./build/cmake/qwen3 --help` for all options.
 
