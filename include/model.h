@@ -22,7 +22,7 @@
 class Model {
 public:
     using TokenCallback = std::function<void(std::int32_t)>;
-
+    // loads all tensors
     explicit Model(const std::string& path, int context_length = 512, Device device = Device::CPU);
     ~Model();
 
@@ -33,9 +33,8 @@ public:
 
     const Config* GetConfig() const noexcept;
     const std::unordered_map<std::string, TensorInfo>& GetTensorIndex() const noexcept;
-
+    
     void InitializeInference(int context_length = 512);
-    void ResetInference();
 
     template <SupportedTensorElement T>
     Tensor<T> LoadTensor(const std::string& name) const {
@@ -45,7 +44,7 @@ public:
         }
 
         const TensorInfo& info = it->second;
-        const std::vector<std::uint8_t> bytes = LoadTensorBytes(
+        const std::vector<std::byte> bytes = LoadTensorBytes(
             model_path_, info, ExpectedDType<T>(), sizeof(T));
 
         std::vector<T> data(bytes.size() / sizeof(T));
@@ -94,6 +93,7 @@ private:
     float* normalized_state_ = nullptr;
     float* logits_ = nullptr;
     Device device;
+    bool inference_mode_ = false;
 };
 
 #endif

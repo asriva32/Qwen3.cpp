@@ -37,7 +37,8 @@ add_library(qwen3_core STATIC
     src/backend/model/model.cpp
     src/backend/sampler/sampler.cpp
     src/backend/tokenizer/tokenizer.cpp
-    src/backend/utils/loader.cpp
+    src/backend/loader.cpp
+    src/backend/inference/inference.cpp
 )
 if(QWEN3_ENABLE_CUDA)
     target_sources(qwen3_core PRIVATE src/backend/inference/infer.cu)

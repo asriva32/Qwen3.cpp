@@ -15,7 +15,7 @@ constexpr char kMagic[8] = {'Q', 'W', 'E', 'N', '3', 'C', 'P', '\0'};
 constexpr std::uint32_t kVersion = 1;
 
 template <typename T>
-auto ReadPod(std::istream& in) -> T {
+auto ReadValue(std::istream& in) -> T {
     T value{};
     in.read(reinterpret_cast<char*>(&value), sizeof(T));
     if (!in) {
@@ -24,11 +24,7 @@ auto ReadPod(std::istream& in) -> T {
     return value;
 }
 
-auto ReadString(std::istream& in, std::uint64_t size) -> std::string {
-    if (size > static_cast<std::uint64_t>(std::numeric_limits<size_t>::max())) {
-        throw std::runtime_error("String record is too large for this platform");
-    }
-
+auto ReadString(std::istream& in, std::size_t size) -> std::string {
     std::string value(static_cast<size_t>(size), '\0');
     in.read(value.data(), static_cast<std::streamsize>(value.size()));
     if (!in) {
@@ -37,17 +33,7 @@ auto ReadString(std::istream& in, std::uint64_t size) -> std::string {
     return value;
 }
 
-auto CheckSize(size_t value, const std::string& field) -> size_t {
-    if (value > std::numeric_limits<size_t>::max()) {
-        throw std::runtime_error(field + " does not fit in size_t");
-    }
-    return static_cast<size_t>(value);
-}
-
 auto SkipBytes(std::istream& in, size_t bytes) -> void {
-    if (bytes > static_cast<size_t>(std::numeric_limits<std::streamoff>::max())) {
-        throw std::runtime_error("Tensor payload is too large to seek over");
-    }
     in.seekg(static_cast<std::streamoff>(bytes), std::ios::cur);
     if (!in) {
         throw std::runtime_error("Unexpected end of Qwen3.bin while skipping tensor payload");
@@ -58,12 +44,12 @@ auto DTypeSize(TensorDType dtype) -> size_t {
     switch (dtype) {
         case TensorDType::Float32:
             return 4;
+        case TensorDType::Int32:
+            return 4;
         case TensorDType::BFloat16:
             return 2;
         case TensorDType::UInt8:
             return 1;
-        case TensorDType::Int32:
-            return 4;
     }
     std::unreachable();
 }
@@ -119,6 +105,7 @@ auto JsonValue(const std::string& json, const std::string& key) -> std::string {
     }
     return json.substr(pos, end - pos);
 }
+
 template<SupportedJsonValue T>
 auto GetJsonValue(const std::string &json, const std::string& key) -> T {
     const auto value = JsonValue(json, key);
@@ -141,17 +128,17 @@ auto GetJsonValue(const std::string &json, const std::string& key) -> T {
 
 auto ReadTensorInfo(std::istream& in) -> TensorInfo {
     auto info = TensorInfo{};
-    const auto name_size = ReadPod<std::uint32_t>(in);
+    const auto name_size = ReadValue<std::uint32_t>(in);
     info.name = ReadString(in, name_size);
-    info.dtype = static_cast<TensorDType>(ReadPod<std::uint32_t>(in));
+    info.dtype = static_cast<TensorDType>(ReadValue<std::uint32_t>(in));
 
-    const auto ndim = ReadPod<std::uint32_t>(in);
+    const auto ndim = ReadValue<std::uint32_t>(in);
     info.shape.reserve(ndim);
     for (auto i{0uz}; i < ndim; ++i) {
-        info.shape.push_back(CheckSize(ReadPod<size_t>(in), "tensor dimension"));
+        info.shape.push_back(ReadValue<size_t>(in));
     }
 
-    info.byte_size = CheckSize(ReadPod<size_t>(in), "tensor byte size");
+    info.byte_size = ReadValue<size_t>(in);
 
     auto CheckedTell = [](std::istream& in) {
         const auto pos = in.tellg();
@@ -161,7 +148,7 @@ auto ReadTensorInfo(std::istream& in) -> TensorInfo {
         return static_cast<size_t>(pos);
     };
     
-    info.data_offset = CheckSize(CheckedTell(in), "tensor data offset");
+    info.data_offset = CheckedTell(in);
     ValidateTensorByteSize(info);
     return info;
 }
@@ -193,7 +180,7 @@ auto ReadTensorBytes(
     const std::string& path,
     const TensorInfo& info,
     size_t element_size
-) -> std::vector<std::uint8_t> {
+) -> std::vector<std::byte> {
     if (element_size == 0 || info.byte_size % element_size != 0) {
         throw std::runtime_error("Tensor byte size is not aligned: " + info.name);
     }
@@ -211,8 +198,7 @@ auto ReadTensorBytes(
     if (!in) {
         throw std::runtime_error("Failed to seek to tensor: " + info.name);
     }
-
-    auto data = std::vector<std::uint8_t>(info.byte_size);
+    std::vector<std::byte> data(info.byte_size);
     in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(info.byte_size));
     if (!in) {
         throw std::runtime_error("Failed to read tensor payload: " + info.name);
@@ -227,16 +213,21 @@ auto LoadTensorBytes(
     const TensorInfo& info,
     TensorDType expected_dtype,
     size_t element_size
-) -> std::vector<std::uint8_t> {
+) -> std::vector<std::byte> {
     if (info.dtype != expected_dtype) {
         throw std::runtime_error("Tensor dtype mismatch: " + info.name);
     }
     return ReadTensorBytes(path, info, element_size);
 }
 
-// Load Model 
 
 Model::Model(const std::string& path, int context_length, Device device) : device(device) {
+    if (device == Device::GPU && !cuda_backend_available()) {
+        throw std::runtime_error(
+            "GPU inference is unavailable in this CPU-only build"
+        );
+    }
+
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         throw std::runtime_error("Failed to open model file: " + path);
@@ -248,12 +239,12 @@ Model::Model(const std::string& path, int context_length, Device device) : devic
         throw std::runtime_error("Invalid Qwen3 model file magic");
     }
 
-    const auto version = ReadPod<std::uint32_t>(in);
+    const auto version = ReadValue<std::uint32_t>(in);
     if (version != kVersion) {
         throw std::runtime_error("Unsupported Qwen3 model file version");
     }
 
-    const auto metadata_size = ReadPod<std::uint64_t>(in);
+    const auto metadata_size = ReadValue<std::size_t>(in);
     const auto metadata_json = ReadString(in, metadata_size);
     inference_config_ = std::make_shared<Config>(metadata_json);
     if (inference_config_->dtype != "bf16") {
@@ -263,7 +254,7 @@ Model::Model(const std::string& path, int context_length, Device device) : devic
     model_path_ = path;
     model_max_seq_len_ = inference_config_->max_seq_len;
 
-    const auto tensor_count = ReadPod<std::uint64_t>(in);
+    const auto tensor_count = ReadValue<std::size_t>(in);
     for (auto i{0uz}; i < tensor_count; ++i) {
         TensorInfo info = ReadTensorInfo(in);
         ValidateSupportedTensorType(info);

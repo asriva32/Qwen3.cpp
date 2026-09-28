@@ -151,7 +151,8 @@ int main(int argc, char** argv) {
         if (options.threads > 0) {
             omp_set_num_threads(options.threads);
         }
-        Model model(options.model_path, options.context_length, (options.device == "gpu" ? Device::GPU : Device::CPU));
+        Device device = (options.device == "gpu" ? Device::GPU : Device::CPU);
+        Model model(options.model_path, options.context_length, device);
         const Tokenizer tokenizer(model);
         const auto prompt_tokens = options.prompt
             ? tokenizer.Encode(

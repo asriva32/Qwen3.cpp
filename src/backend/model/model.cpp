@@ -3,14 +3,7 @@
 #include <algorithm>
 #include <chrono>
 
-auto Model::GetConfig() const noexcept -> const Config* {
-    return inference_config_.get();
-}
-
-auto Model::GetTensorIndex() const noexcept
-    -> const std::unordered_map<std::string, TensorInfo>& {
-    return tensors_;
-}
+namespace {
 
 std::bfloat16_t* CopyTensorData(std::bfloat16_t *a, size_t size) {
     std::bfloat16_t* out = new std::bfloat16_t[size];
@@ -38,8 +31,21 @@ auto BuildDeviceArray(float*& a, size_t size, Device device) -> void {
     }
 }
 
+} // namespace
+
+auto Model::GetConfig() const noexcept -> const Config* {
+    return inference_config_.get();
+}
+
+auto Model::GetTensorIndex() const noexcept
+    -> const std::unordered_map<std::string, TensorInfo>& {
+    return tensors_;
+}
+
 auto Model::InitializeInference(int context_length) -> void {
-    ReleaseInference();
+    if (inference_mode_) {
+        return;
+    }
     auto& config = GetInferenceConfig();
     config.max_seq_len = context_length;
     using bf16 = std::bfloat16_t;
@@ -53,16 +59,9 @@ auto Model::InitializeInference(int context_length) -> void {
         BuildWeightTensor(output_, output, device);
     }
 
-    
-
     const auto dim = static_cast<size_t>(config.dim);
     const auto vocab_size = static_cast<size_t>(config.vocab_size);
-    if (embedding_.size != vocab_size * dim || final_norm_.size != dim ||
-        (!config.tie_word_embeddings && output_.size != vocab_size * dim)) {
-        throw std::runtime_error("Invalid embedding, final norm, or output tensor shape");
-    }
 
-    blocks_.clear();
     blocks_.reserve(config.n_layers);
     for (auto layer{0}; layer < config.n_layers; ++layer) {
         const std::string prefix = "model.layers." + std::to_string(layer);
@@ -90,20 +89,18 @@ auto Model::InitializeInference(int context_length) -> void {
         BuildWeightTensor(block.w1_, w1, device);
         BuildWeightTensor(block.w2_, w2, device);
         BuildWeightTensor(block.w3_, w3, device);
-        blocks_.emplace_back(std::move(block));
+        blocks_.push_back(std::move(block));
     }
 
     for (const auto& block : blocks_) {
         block.ValidateWeights();
     }
 
-    const auto prefill_capacity = std::min(
-        kPrefillBatchSize,
-        static_cast<size_t>(config.max_seq_len)
-    );
+    const auto prefill_capacity = std::min(kPrefillBatchSize, static_cast<size_t>(config.max_seq_len));
     BuildDeviceArray(hidden_state_, prefill_capacity * dim, device);
     BuildDeviceArray(normalized_state_, prefill_capacity * dim, device);
     BuildDeviceArray(logits_, config.vocab_size, device);
+    inference_mode_ = true;
 }
 
 Model::~Model() {
@@ -137,40 +134,10 @@ auto Model::ReleaseInference() noexcept -> void {
     release_float(logits_);
 }
 
-auto Model::ResetInference() -> void {
-    for (Block& block : blocks_) {
-        block.ResetCache();
-    }
-    auto& config = GetInferenceConfig();
-    const auto prefill_capacity = std::min(
-        kPrefillBatchSize,
-        static_cast<size_t>(config.max_seq_len)
-    );
-    if (device == Device::GPU) {
-        zero_cuda(
-            hidden_state_, prefill_capacity * config.dim * sizeof(float)
-        );
-        zero_cuda(
-            normalized_state_, prefill_capacity * config.dim * sizeof(float)
-        );
-        zero_cuda(logits_, config.vocab_size * sizeof(float));
-    } else {
-        std::fill_n(hidden_state_, prefill_capacity * config.dim, 0.0f);
-        std::fill_n(normalized_state_, prefill_capacity * config.dim, 0.0f);
-        std::fill_n(logits_, config.vocab_size, 0.0f);
-    }
-}
-
 // -- GPU --
 
 auto Model::ForwardTokenGPU(std::int32_t token, int pos, State& state) -> void {
     const auto& config = GetInferenceConfig();
-    if (token < 0 || token >= config.vocab_size) {
-        throw std::out_of_range("Token id is outside the vocabulary");
-    }
-    if (pos < 0) {
-        throw std::out_of_range("Token position must not be negative");
-    }
 
     const auto* embedding_row =
         embedding_.data + static_cast<size_t>(token) * config.dim;
@@ -216,13 +183,6 @@ auto Model::PrefillGPU(
 ) -> void {
     const auto num_tokens = tokens.size();
     const auto& config = GetInferenceConfig();
-
-    if (tokens.empty()) {
-        throw std::invalid_argument("Prefill requires at least one token");
-    }
-    if (pos < 0) {
-        throw std::out_of_range("Token position must not be negative");
-    }
 
     const auto start = static_cast<size_t>(pos);
     const auto context_length = static_cast<size_t>(config.max_seq_len);
@@ -272,12 +232,6 @@ auto Model::PrefillGPU(
 
 auto Model::ForwardTokenCPU(std::int32_t token, int pos, State& state) -> void {
     const auto& config = GetInferenceConfig();
-    if (token < 0 || token >= config.vocab_size) {
-        throw std::out_of_range("Token id is outside the vocabulary");
-    }
-    if (pos < 0) {
-        throw std::out_of_range("Token position must not be negative");
-    }
 
     const auto* embedding_row =
         embedding_.data + static_cast<size_t>(token) * config.dim;
@@ -324,28 +278,15 @@ auto Model::PrefillCPU(
     const auto num_tokens = tokens.size();
     const auto& config = GetInferenceConfig();
 
-    if (tokens.empty()) {
-        throw std::invalid_argument("Prefill requires at least one token");
-    }
-    if (pos < 0) {
-        throw std::out_of_range("Token position must not be negative");
-    }
-
     const auto start = static_cast<size_t>(pos);
     const auto context_length = static_cast<size_t>(config.max_seq_len);
     if (start > context_length || num_tokens > context_length - start) {
         throw std::out_of_range("Prefill chunk exceeds maximum context length");
     }
-    // if (num_tokens > state.batch_capacity ||
-    //     num_tokens > hidden_state_.size() / static_cast<size_t>(config.dim)) {
-    //     throw std::length_error("Prefill chunk exceeds CPU batch capacity");
-    // }
 
     for (auto t{0uz}; t < num_tokens; ++t) {
         const auto token = tokens[t];
-        if (token < 0 || token >= config.vocab_size) {
-            throw std::out_of_range("Token id is outside the vocabulary");
-        }
+        
         const auto* embedding_row =
             embedding_.data + static_cast<size_t>(token) * config.dim;
         auto* destination =

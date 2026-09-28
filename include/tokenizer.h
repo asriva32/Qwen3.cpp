@@ -12,8 +12,6 @@
 
 class Model;
 
-// Dependency-free byte-level BPE tokenizer. The model constructor loads the
-// vocabulary and ranked merge table embedded in a converted Qwen model.
 class Tokenizer {
 public:
     using Merge = std::pair<std::string, std::string>;

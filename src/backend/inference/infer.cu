@@ -7,8 +7,6 @@
 
 #include "layers.h"
 
-// TODO: split kernels into prefill and decode
-
 inline constexpr int kTileSize = 16;
 
 namespace {
@@ -31,6 +29,10 @@ void check_cuda(cudaError_t result, const char* expression, const char* file, in
 #define CUDA_CHECK(expression) do {                \
     check_cuda((expression), #expression, __FILE__, __LINE__); \
 } while(0)
+
+bool cuda_backend_available() noexcept {
+    return true;
+}
 
 extern "C" void set_cuda_device(int device) {
     CUDA_CHECK(cudaSetDevice(device));

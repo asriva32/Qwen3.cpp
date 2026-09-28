@@ -15,14 +15,14 @@ extern "C" void free_cuda(void* device);
 extern "C" void set_cuda_device(int device);
 extern "C" void download_cuda(void* host, const void* device, size_t size);
 extern "C" void synchronize_cuda();
+bool cuda_backend_available() noexcept;
 
 inline constexpr size_t kPrefillBatchSize = 128;
 
 struct State {
-    // From ffn
+
     float* lin1 = nullptr;
     float* lin2 = nullptr;
-    // From Block
     float* norm_buffer = nullptr;
     float* q = nullptr;
     float* k = nullptr;
@@ -84,13 +84,13 @@ struct State {
     State& operator=(const State&) = delete;
 
     State(State&& other) noexcept {
-        TakeOwnership(other);
+        ExchangeMembers(other);
     }
 
     State& operator=(State&& other) noexcept {
         if (this != &other) {
             Release();
-            TakeOwnership(other);
+            ExchangeMembers(other);
         }
         return *this;
     }
@@ -133,7 +133,7 @@ private:
         batch_capacity = 0;
     }
 
-    void TakeOwnership(State& other) noexcept {
+    void ExchangeMembers(State& other) noexcept {
         lin1 = std::exchange(other.lin1, nullptr);
         lin2 = std::exchange(other.lin2, nullptr);
         norm_buffer = std::exchange(other.norm_buffer, nullptr);

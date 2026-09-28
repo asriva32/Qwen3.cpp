@@ -86,7 +86,7 @@ constexpr TensorDType ExpectedDType() {
     }
 }
 
-std::vector<std::uint8_t> LoadTensorBytes(
+std::vector<std::byte> LoadTensorBytes(
     const std::string& path,
     const TensorInfo& info,
     TensorDType expected_dtype,

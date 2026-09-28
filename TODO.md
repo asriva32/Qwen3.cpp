@@ -1,1 +1,4 @@
-- Start implementing gpu path
+ - cuda graphs
+ - quantization
+ - support for moe
+ - extend models
